@@ -1,0 +1,2760 @@
+---
+title: "analysis"
+author: "Luise Bellach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set up
+
+load libraries
+
+```{r libraries}
+if(!require("pacman"))install.packages("pacman")
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+pacman::p_load(tidyverse, todor, rio, here, data.table, tinytex, DT, #basic setup
+               ggside, ComplexHeatmap, RColorBrewer, ggtext, patchwork, ggalluvial, ggh4x, corrplot, ggpubr, gridExtra, grDevices, stringr, ggplotify, ggpubr, #graphics
+               rstatix, Hmisc,  mixOmics, cluster, nlme, robCompositions, caret, EnhancedVolcano, magrittr, #statistics
+               ANCOMBC, timeOmics, microbiome, microbiomeutilities, MicrobiomeStat,
+               vegan, DESeq2, phyloseq, ecodist, microViz, permute, MicrobiomeProfiler, mia) #microbial analyses
+options(DT.options = list(
+  initComplete = JS("function(settings, json) {",
+  "$(this.api().table().header()).css({'background-color': 
+  '#000', 'color': '#fff'});","}")))
+
+```
+
+# Load data
+
+```{r import tweaked data}
+phylo <- rio::import(here::here("data", "tweaked_ps.rds"))
+```
+
+# Manage data
+
+```{r data management}
+phylo <- rio::import(here::here("data", "tweaked_ps.rds"))
+
+host_subj_id <- phylo %>% 
+  samdat_tbl() %>% 
+  dplyr::select(JMF_sample_ID, host_subject_id)
+
+#get the IDs for long. analysis
+rule_in <- host_subj_id %>% 
+  dplyr::group_by(host_subject_id) %>% 
+  dplyr::filter(length(host_subject_id) == 2) %>% 
+  dplyr::slice(1) %>% 
+  dplyr::pull(host_subject_id)
+
+psych.data <- rio::import(here::here("data", "psych.extension.xlsx")) %>% 
+  dplyr::rename(host_subject_id = PID, 
+                Timepoint = Visit, 
+                cortisol_sputum = Cortisol_Speichel, 
+                estradiol = oestradiol, 
+                hip_circumference	= Hueftumfang, 
+                waist_circumference =	Bauchumfang2,
+                waist_hip_ratio =	W_Hi,
+                waist_height_ratio =	W_He,
+                smoking	= Rauchen,
+                alcohol_consumption	= Alkohol, 
+                insulin_sensitivity	= Sensitivity,
+                insulin_resistance = Resistance,
+                body_weight	= Koerpergewicht,
+                phase_angle =	Phasenwinkel, 
+                lean_mass =	Magermasse, 
+                body_fat = Koerperfett,
+                somatization = Somatisierung,
+                obsession_compulsion = Zwang, 
+                interpersonal_sensitivity = Sozial,
+                depression = Depress,
+                anxiety = Aengstl,
+                hostility = Aggress,
+                phobic_anxiety = Angst,
+                paranoid_ideation = Paranoid,
+                psychotism = Psychotiz,
+                relax_HRV = Ent_HRV) %>% 
+  dplyr::mutate(Timepoint = case_when(Timepoint == 1 ~ "before", 
+                                      Timepoint == 2 ~ "after", 
+                                      TRUE ~ NA), 
+                host_subject_id = as.factor(host_subject_id))
+
+
+# merge data frame
+joined.phylo <- phylo %>% 
+  ps_filter(host_diet != "negative control",
+            .keep_all_taxa = TRUE, 
+            host_subject_id %in% rule_in) %>% 
+  ps_select(JMF_sample_ID:organism, host_subject_id, Timepoint, diet_cpi, host_diet, Treatment, 
+                host_age, Fatty_Liver_Index, host_body_mass_index,
+                Perceived_Stress_Scale) %>% 
+  ps_join(psych.data, 
+          by = c("host_subject_id", "Timepoint"), 
+          type = "left") %>% 
+  ps_mutate(before_groups = case_when(Timepoint == "before" ~ "baseline", 
+                                          Timepoint == "after" ~ diet_cpi, 
+                                          TRUE ~ NA), 
+            Timepoint = factor(Timepoint, levels = c("before", "after")), 
+            BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) 
+
+
+
+```
+
+# Baseline Table
+
+```{r baseline and follow up changes, fig.width= 5, fig.height=10}
+# filter out IDs without a second measurement 
+# define a frame data frame and select only those patients which have an entry for both visits
+timepoint <- joined.phylo %>% 
+  samdat_tbl() %>% 
+  dplyr::select(JMF_sample_ID, Timepoint, host_subject_id,
+                host_diet, Treatment, 
+                host_age, Fatty_Liver_Index, host_body_mass_index,
+                Perceived_Stress_Scale) %>% 
+  dplyr::group_by(host_subject_id) %>% 
+  dplyr::filter(n() == 2) %>% 
+  dplyr::ungroup()
+length(unique(timepoint$host_subject_id))
+#define which IDs belong to which timepoint
+rule_in <- base::unique(timepoint$host_subject_id)
+
+
+joined.phylo %>% 
+  samdat_tbl() %>% 
+  dplyr::filter(host_subject_id %in% rule_in) %>%
+  dplyr::group_by(host_subject_id) %>% 
+  dplyr::slice(1) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(host_diet, Menopause) %>% 
+  dplyr::mutate(Menopause = ifelse(is.na(Menopause), 0, Menopause)) %>% 
+  dplyr::group_by(host_diet, Menopause) %>% 
+  dplyr::tally() %>% 
+  rstatix::spread(Menopause, n)
+```
+
+
+```{r baseline and follow up changes, fig.width= 5, fig.height=10}
+rule_in_dat <- joined.phylo@sam_data %>% 
+  group_by(host_subject_id) %>% 
+  filter(n()== 2) %>%
+  dplyr::slice(1L)
+
+#save for later use
+rio::export(rule_in_dat[, "host_subject_id"], here::here("data", "pat_for_longitudinal.xlsx"))
+#save as variable
+rule_in <- rule_in_dat$host_subject_id
+
+
+# mean changes for sample description
+
+timepoint %>% 
+  dplyr::group_by(Timepoint) %>% 
+  dplyr::summarise(mean.BMI = mean(na.omit(host_body_mass_index)), 
+                   sd.BMI = sd(na.omit(host_body_mass_index)),
+                   mean.PSS = mean(na.omit(Perceived_Stress_Scale)), 
+                   sd.PSS = sd(na.omit(Perceived_Stress_Scale)))
+
+timepoint %>% 
+  dplyr::select(host_subject_id, Timepoint, host_body_mass_index) %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "host_body_mass_index") %>% 
+  dplyr::mutate(BMI_change = after - before) %>% 
+  dplyr::summarise(mean = mean(na.omit(BMI_change)), 
+                   sd = sd(na.omit(BMI_change)))
+
+timepoint %>% 
+  dplyr::select(host_subject_id, Timepoint, Perceived_Stress_Scale) %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "Perceived_Stress_Scale") %>% 
+  dplyr::mutate(PSS_change = after - before) %>% 
+  dplyr::summarise(mean = mean(na.omit(PSS_change)), 
+                   sd = sd(na.omit(PSS_change)))
+  
+
+timepoint %>% 
+  dplyr::select(host_subject_id, Timepoint, Perceived_Stress_Scale) %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "Perceived_Stress_Scale") %>% 
+  dplyr::mutate(PSS_3P = ifelse((after - before) <= -3, "decrease", "no decrease")) %>% 
+  dplyr::group_by(PSS_3P) %>% 
+  dplyr::summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+  
+# Bact/Firm ratio
+
+BactFirm_input <- joined.phylo %>%
+  ps_filter(host_diet != "negative control",
+            .keep_all_taxa = TRUE, 
+            host_subject_id %in% rule_in) %>% 
+  tax_fix() %>%
+#  tax_transform("compositional", rank = "Phylum") %>%
+#  tax_transform("log2", zero_replace = "halfmin", chain = TRUE) %>%
+#  ps_get() %>%
+#  ps_otu2samdat(c("Bacteroidota", "Firmicutes")) %>% 
+  comp_barplot("Phylum") 
+ 
+BactFirm_data <- data.frame(OTU = BactFirm_input$data$OTU, 
+                            JMF_sample_ID = BactFirm_input$data$Sample, 
+                            abundance = BactFirm_input$data$Abundance) %>% 
+  dplyr::filter(OTU %in% c("Bacteroidota", "Firmicutes")) %>% 
+  tidyr::pivot_wider(names_from = "OTU", values_from = "abundance") 
+  
+baseline_tab <- joined.phylo %>%
+  ps_filter(host_diet != "negative control",
+            .keep_all_taxa = TRUE, 
+            host_subject_id %in% rule_in) %>% 
+  tax_fix() %>% 
+  samdat_tbl() %>% 
+  dplyr::select(JMF_sample_ID, Timepoint, host_subject_id,
+                host_diet, Treatment, 
+                host_age, Fatty_Liver_Index, host_body_mass_index,
+                Perceived_Stress_Scale, GSI, 
+                BODI_job:BODI_dysfunct_compensation, 
+                somatization:psychotism, 
+                host_age, host_body_mass_index, 
+                cortisol_sputum, IL_6, CRP, 
+                BODI_red_resilience, BODI_red_distancing, 
+                BODI_depression, BODI_dysfunct_compensation, 
+                MtoF, 
+                somatization, obsession_compulsion, interpersonal_sensitivity, 
+                depression, anxiety, hostility, phobic_anxiety,
+                paranoid_ideation, psychotism, GSI, 
+                Baseline_HRV, Stress_HRV, relax_HRV) %>% 
+  dplyr::left_join(BactFirm_data, by = "JMF_sample_ID") %>% 
+  dplyr::mutate(Firm_Bact_ratio = Firmicutes / Bacteroidota)
+
+# check distribution
+
+variables <- colnames(baseline_tab)[!colnames(baseline_tab) %in% c("JMF_sample_ID", "Timepoint", "host_diet", "Treatment", "host_subject_id")]
+  
+#  c("host_age", "Fatty_Liver_Index", "host_body_mass_index", "Perceived_Stress_Scale", "Global_Severity_Index", "Firm_Bact_ratio")
+
+
+baseline_tab %>% 
+  tidyr::pivot_longer(cols = variables, names_to = "variables", values_to = "value") %>% 
+  ggplot(aes(x = value, group = variables, fill = variables)) +
+  geom_density() + 
+  facet_wrap(vars(Timepoint, variables), scales = "free")
+
+
+baseline_tab %>% 
+  dplyr::mutate(Firm_Bact_ratio = log10(Firm_Bact_ratio), 
+                host_body_mass_index = log10(host_body_mass_index), 
+                Fatty_Liver_Index = log10(Fatty_Liver_Index)) %>% 
+  tidyr::pivot_longer(cols = variables, names_to = "variables", values_to = "value") %>% 
+  ggplot(aes(x = value, group = variables, fill = variables)) +
+  geom_density() + 
+  facet_wrap(vars(Timepoint, variables), scales = "free")
+
+
+check.skewed <- function(x){
+  y <- shapiro.test(x)
+  return(round(y$p.value, digits = 3))
+}
+
+#check skew
+baseline_tab.skew <- baseline_tab %>% 
+  dplyr::mutate(Timepoint == factor(Timepoint, levels = c("before", "after"))) %>% 
+  dplyr::group_by(Timepoint) %>% 
+  dplyr::select(all_of(variables)) %>% 
+  summarise_all(check.skewed) %>% 
+  t() %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column(var = "variable") %>%  
+  dplyr::filter(X1 != "before") %>% 
+  dplyr::select(variable, X2, X1) %>% 
+  dplyr::mutate(skewed = ifelse(X1 < 0.05 | X2 < 0.05, TRUE, FALSE))
+colnames(baseline_tab.skew) <- c("variable", "before", "after", "skewed")
+
+param.vars <- subset(baseline_tab.skew, skewed == FALSE)$variable 
+skewed.vars <- subset(baseline_tab.skew, skewed == TRUE)$variable 
+
+
+baseline_tab.skew2 <- baseline_tab %>% 
+  dplyr::mutate(Timepoint == factor(Timepoint, levels = c("before", "after"))) %>% 
+  dplyr::group_by(Timepoint) %>% 
+  dplyr::select(all_of(skewed.vars)) %>% 
+  dplyr::mutate_all(log10) %>% 
+  summarise_all(check.skewed) %>% 
+  t() %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column(var = "variable") %>%  
+  dplyr::filter(X1 != "before") %>% 
+  dplyr::select(variable, X2, X1) %>% 
+  dplyr::mutate(skewed = ifelse(X1 < 0.05 | X2 < 0.05, TRUE, FALSE))
+colnames(baseline_tab.skew2) <- c("variable", "before", "after", "skewed")
+
+log10.tf.vars <- subset(baseline_tab.skew2, skewed == FALSE)$variable 
+non.param.vars <- subset(baseline_tab.skew2, skewed == TRUE)$variable 
+
+# make functions
+#mean / sd
+sum.mean.na.omit <- function(x){
+  y <- round(mean(na.omit(x)), digits = 3)
+  return(y)
+}
+
+sum.sd.na.omit <- function(x){
+  y <- round(sd(na.omit(x)), digits = 3)
+  return(y)
+}
+
+#median / iqr
+sum.median.na.omit <- function(x){
+  y <- round(median(na.omit(x)), digits = 3)
+  return(y)
+}
+
+sum.iqr.na.omit <- function(x){
+  y <- round(iqr(na.omit(x)), digits = 3)
+  return(y)
+}
+
+#make the table
+make.baseline.tab <- function(dat, var, fun, test){
+  dat.in <- dat %>% 
+    dplyr::mutate(Timepoint == factor(Timepoint, levels = c("before", "after"))) %>% 
+    dplyr::group_by(Timepoint) %>% 
+    dplyr::select(all_of(var)) %>% 
+    summarise_all(fun) %>% 
+    t() %>% 
+    data.frame() %>% 
+    tibble::rownames_to_column(var = "variable") %>%  
+    dplyr::filter(X1 != "after") %>% 
+    dplyr::select(variable, X2, X1)
+  colnames(dat.in) <- c("variable", paste0(test, ".before"), paste0(test, ".after"))
+  return(dat.in)
+}
+
+
+make.baseline.tab.BL <- function(dat, var, fun, test){
+  dat.in <- dat %>% 
+    dplyr::group_by(host_diet) %>% 
+    dplyr::select(all_of(var)) %>% 
+    summarise_all(fun) %>% 
+    t() %>% 
+    data.frame() %>% 
+    tibble::rownames_to_column(var = "variable") %>%  
+    dplyr::filter(X1 != "FXM") %>% 
+    dplyr::select(variable, X2, X1)
+  colnames(dat.in) <- c("variable", paste0(test, ".VLCD"), paste0(test, ".FXM"))
+  return(dat.in)
+}
+
+
+# before & after table
+
+baseline_tab.summary.param <- cbind(make.baseline.tab(dat = baseline_tab, 
+                                         var = c(param.vars, log10.tf.vars), 
+                                         fun = sum.mean.na.omit, 
+                                         test = "mean"),
+                              make.baseline.tab(dat = baseline_tab, 
+                                         var = c(param.vars, log10.tf.vars), 
+                                         fun = sum.sd.na.omit, 
+                                         test = "sd"))
+colnames(baseline_tab.summary.param) <- c("variable", "mean.before", "mean.after" , "ex.variable", "sd.before", "sd.after" )
+baseline_tab.summary.param <- baseline_tab.summary.param %>% 
+  dplyr::select(-ex.variable)
+
+
+baseline_tab.summary.non.param <- cbind(make.baseline.tab(dat = baseline_tab, 
+                                         var = non.param.vars, 
+                                         fun = sum.median.na.omit, 
+                                         test = "median"),
+                              make.baseline.tab(dat = baseline_tab, 
+                                         var = non.param.vars, 
+                                         fun = sum.iqr.na.omit, 
+                                         test = "iqr"))
+colnames(baseline_tab.summary.non.param) <- c("variable", "median.before", "median.after" , "ex.variable", "iqr.before", "iqr.after" )
+baseline_tab.summary.non.param <- baseline_tab.summary.non.param %>% 
+  dplyr::select(-ex.variable)
+
+
+
+#extract p vals & make table
+p.values.baseline.after <- baseline_tab %>% 
+  dplyr::mutate_at(log10.tf.vars, log10) %>% 
+  dplyr::select(Timepoint, c(param.vars, log10.tf.vars)) %>% 
+  gather(key = "variable", value = "value", -Timepoint) %>% 
+  dplyr::group_by(Timepoint, variable) %>% 
+  dplyr::summarise(value = list(value)) %>%  
+  spread(Timepoint, value) %>% 
+  dplyr::group_by(variable) %>% 
+  dplyr::mutate(p_value = t.test(unlist(before), unlist(after), paired = T)$p.value) %>% 
+  dplyr::select(variable, p_value) %>%  
+  dplyr::left_join(baseline_tab.summary.param, by = "variable") %>% 
+  dplyr::select(variable, mean.before, sd.before, mean.after, sd.after, p_value) %>%  
+  dplyr::mutate(p_value = round(p_value, digits = 3),
+                mean.before = round(as.numeric(mean.before), digits = 2),
+                mean.after = round(as.numeric(mean.after), digits = 2)) %>% 
+  dplyr::mutate(sd.before = round(as.numeric(sd.before), digits = 2),
+                sd.after = round(as.numeric(sd.after), digits = 2)) %>% 
+  dplyr::mutate(before = paste0(mean.before, " +/- ", sd.before), 
+                after = paste0(mean.after, " +/- ", sd.after), 
+                test = "paired t.test", 
+                variable = paste0(variable, ", mean +/- sd"), 
+                p.adj = p.adjust(p_value)) 
+
+print(p.values.baseline.after)
+rio::export(p.values.baseline.after, here::here("data", "baseline_characteristics_mean_sd.xlsx"))
+
+
+p.values.baseline.after.np <- baseline_tab %>% 
+  dplyr::select(Timepoint, non.param.vars) %>% 
+  gather(key = "variable", value = "value", -Timepoint) %>% 
+  dplyr::group_by(Timepoint, variable) %>% 
+  dplyr::summarise(value = list(value)) %>%  
+  spread(Timepoint, value) %>% 
+  dplyr::group_by(variable) %>% 
+  dplyr::mutate(p_value = wilcox.test(unlist(before), unlist(after), paired = T)$p.value) %>% 
+  dplyr::select(variable, p_value) %>%  
+  dplyr::left_join(baseline_tab.summary.non.param, by = "variable") %>% 
+  dplyr::select(variable, median.before, iqr.before, median.after, iqr.after, p_value) %>%  
+  dplyr::mutate(p_value = round(p_value, digits = 3),
+                median.before = round(as.numeric(median.before), digits = 2),
+                median.after = round(as.numeric(median.after), digits = 2)) %>% 
+  dplyr::mutate(iqr.before = round(as.numeric(iqr.before), digits = 2),
+                iqr.after = round(as.numeric(iqr.after), digits = 2)) %>% 
+  dplyr::mutate(before = paste0(median.before, " +/- ", iqr.before), 
+                after = paste0(median.after, " +/- ", iqr.after), 
+                test = "paired wilcox.test", 
+                variable = paste0(variable, ", median +/- iqr"), 
+                p.adj = p.adjust(p_value)) 
+
+print(p.values.baseline.after.np)
+rio::export(p.values.baseline.after.np, here::here("data", "baseline_characteristics_median_iqr.xlsx"))
+
+# distribution
+
+variables <- c("host_age", "host_body_mass_index", 
+                "cortisol_sputum", "IL_6", "CRP", 
+                "BODI_red_resilience", "BODI_red_distancing", 
+                "BODI_depression", "BODI_dysfunct_compensation", 
+                "MtoF", 
+                "somatization", "obsession_compulsion", "interpersonal_sensitivity", 
+                "depression", "anxiety", "hostility", "phobic_anxiety",
+                "paranoid_ideation", "psychotism", "GSI", 
+                "Baseline_HRV", "Stress_HRV", "relax_HRV")
+
+#check skew
+baseline_tab.skew <- baseline_tab %>% 
+  dplyr::filter(Timepoint == "before") %>% 
+  dplyr::group_by(host_diet) %>% 
+  dplyr::select(all_of(variables)) %>% 
+  summarise_all(check.skewed) %>% 
+  t() %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column(var = "variable") %>%  
+  dplyr::filter(X1 != "FXM") %>% 
+  dplyr::select(variable, X2, X1) %>% 
+  dplyr::mutate(skewed = ifelse(X1 < 0.05 | X2 < 0.05, TRUE, FALSE))
+colnames(baseline_tab.skew) <- c("variable", "FXM", "VLCD", "skewed")
+
+param.vars <- subset(baseline_tab.skew, skewed == FALSE)$variable 
+skewed.vars <- subset(baseline_tab.skew, skewed == TRUE)$variable 
+
+
+baseline_tab.skew2 <- baseline_tab %>% 
+  dplyr::filter(Timepoint == "before") %>% 
+  dplyr::group_by(host_diet) %>% 
+  dplyr::select(all_of(skewed.vars)) %>% 
+  dplyr::mutate_all(log10) %>% 
+  summarise_all(check.skewed) %>% 
+  t() %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column(var = "variable") %>%  
+  dplyr::filter(X1 != "FXM") %>% 
+  dplyr::select(variable, X2, X1) %>% 
+  dplyr::mutate(skewed = ifelse(X1 < 0.05 | X2 < 0.05, TRUE, FALSE))
+colnames(baseline_tab.skew2) <- c("variable", "FXM", "VLCD", "skewed")
+
+log10.tf.vars <- subset(baseline_tab.skew2, skewed == FALSE)$variable 
+non.param.vars <- subset(baseline_tab.skew2, skewed == TRUE)$variable 
+
+# baseline table (before)
+
+baseline.before.tab <- baseline_tab %>% 
+  dplyr::filter(Timepoint == "before") %>% 
+  dplyr::select(host_diet, 
+                host_age, host_body_mass_index, 
+                cortisol_sputum, IL_6, CRP, 
+                BODI_red_resilience, BODI_red_distancing, 
+                BODI_depression, BODI_dysfunct_compensation, 
+                MtoF, 
+                somatization, obsession_compulsion, interpersonal_sensitivity, 
+                depression, anxiety, hostility, phobic_anxiety,
+                paranoid_ideation, psychotism, GSI, 
+                Baseline_HRV, Stress_HRV, relax_HRV) 
+
+df.BL.log10TF <- baseline.before.tab %>% 
+  dplyr::mutate_at(log10.tf.vars, log10)
+
+
+
+# parametric variables
+
+baseline_tab.summary.param <- cbind(make.baseline.tab.BL(dat = baseline.before.tab, 
+                                         var = c(param.vars, log10.tf.vars), 
+                                         fun = sum.mean.na.omit, 
+                                         test = "mean"),
+                              make.baseline.tab.BL(dat = baseline.before.tab, 
+                                         var = c(param.vars, log10.tf.vars), 
+                                         fun = sum.sd.na.omit, 
+                                         test = "sd"))
+colnames(baseline_tab.summary.param) <- c("variable", "mean.VLCD", "mean.FXM" , "ex.variable", "sd.VLCD", "sd.FXM" )
+baseline_tab.summary.param <- baseline_tab.summary.param %>% 
+  dplyr::select(-ex.variable)
+
+
+p.values.baseline.before <- df.BL.log10TF %>% 
+  dplyr::select(host_diet, all_of(c(param.vars, log10.tf.vars))) %>% 
+  gather(key = "variable", value = "value", -host_diet) %>% 
+  dplyr::group_by(host_diet, variable) %>% 
+  dplyr::summarise(value = list(value)) %>%  
+  spread(host_diet, value) %>% 
+  dplyr::group_by(variable) %>% 
+  dplyr::mutate(p_value = t.test(unlist(VLCD), unlist(FXM), paired = F)$p.value) %>% 
+  dplyr::select(variable, p_value) %>%  
+  dplyr::left_join(baseline_tab.summary.param, by = "variable") %>% 
+  dplyr::mutate(p_value = round(p_value, digits = 3),
+                mean.VLCD = round(as.numeric(mean.VLCD), digits = 2),
+                mean.FXM = round(as.numeric(mean.FXM), digits = 2)) %>% 
+  dplyr::mutate(sd.VLCD = round(as.numeric(sd.VLCD), digits = 2),
+                sd.FXM = round(as.numeric(sd.FXM), digits = 2)) %>% 
+  dplyr::mutate(VLCD = paste0(mean.VLCD, " +/- ", sd.VLCD), 
+                FXM = paste0(mean.FXM, " +/- ", sd.FXM), 
+                test = "unpaired t.test", 
+                variable = paste0(variable, ", mean +/- sd")) 
+
+p.values.baseline.before$p.adj <- p.adjust(p.values.baseline.before$p_value, method = "BH")
+
+print(p.values.baseline.before)
+rio::export(p.values.baseline.before, here::here("data", "psych.baseline_characteristics_mean_sd_only.before.xlsx"))
+
+
+# non-parametric variables
+
+baseline_tab.summary.nonparam <- cbind(make.baseline.tab.BL(dat = baseline.before.tab, 
+                                         var = non.param.vars, 
+                                         fun = sum.median.na.omit, 
+                                         test = "median"),
+                              make.baseline.tab.BL(dat = baseline.before.tab, 
+                                         var = non.param.vars, 
+                                         fun = sum.iqr.na.omit, 
+                                         test = "iqr"))
+colnames(baseline_tab.summary.nonparam) <- c("variable", "median.VLCD", "median.FXM" , "ex.variable", "iqr.VLCD", "iqr.FXM" )
+baseline_tab.summary.nonparam <- baseline_tab.summary.nonparam %>% 
+  dplyr::select(-ex.variable)
+
+
+p.values.baseline.before.np <- df.BL.log10TF %>% 
+  dplyr::select(host_diet, all_of(non.param.vars)) %>% 
+  gather(key = "variable", value = "value", -host_diet) %>% 
+  dplyr::group_by(host_diet, variable) %>% 
+  dplyr::summarise(value = list(value)) %>%  
+  spread(host_diet, value) %>% 
+  dplyr::group_by(variable) %>% 
+  dplyr::mutate(p_value = wilcox.test(unlist(VLCD), unlist(FXM), paired = F)$p.value) %>% 
+  dplyr::select(variable, p_value) %>%  
+  dplyr::left_join(baseline_tab.summary.nonparam, by = "variable") %>% 
+  dplyr::mutate(p_value = round(p_value, digits = 3),
+                median.VLCD = round(as.numeric(median.VLCD), digits = 2),
+                median.FXM = round(as.numeric(median.FXM), digits = 2)) %>% 
+  dplyr::mutate(iqr.VLCD = round(as.numeric(iqr.VLCD), digits = 2),
+                iqr.FXM = round(as.numeric(iqr.FXM), digits = 2)) %>% 
+  dplyr::mutate(VLCD = paste0(median.VLCD, " +/- ", iqr.VLCD), 
+                FXM = paste0(median.FXM, " +/- ", iqr.FXM), 
+                test = "unpaired wilcox.test", 
+                variable = paste0(variable, ", median +/- iqr")) 
+
+p.values.baseline.before.np$p.adj <- p.adjust(p.values.baseline.before.np$p_value, method = "BH")
+
+print(p.values.baseline.before.np)
+rio::export(p.values.baseline.before.np, here::here("data", "psych.baseline_characteristics_median_IQR_only.before.xlsx"))
+
+PSS.baseline <- baseline_tab %>% 
+  dplyr::filter(Timepoint == "before") %>% 
+  dplyr::select(host_diet, Perceived_Stress_Scale) 
+
+PSS.baseline %>% 
+  dplyr::group_by(host_diet) %>% 
+  dplyr::summarise(mean = mean(na.omit(Perceived_Stress_Scale)),
+                   sd = sd(na.omit(Perceived_Stress_Scale)))
+
+t.test(subset(PSS.baseline, host_diet == "FXM")$Perceived_Stress_Scale, 
+       subset(PSS.baseline, host_diet == "VLCD")$Perceived_Stress_Scale, 
+       paired = F)
+
+
+# diversity subset
+richness.df <- phylo %>%
+  ps_filter(host_diet != "negative control",
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>%
+  ps_mutate(subgroups = case_when(host_diet == "FXM" & Treatment == "intervention" ~ "FXM, CPI",
+                                  host_diet == "FXM" & Treatment == "control" ~ "FXM, no CPI",
+                                  host_diet == "VLCD" & Treatment == "intervention" ~ "VLCD, CPI",
+                                  host_diet == "VLCD" & Treatment == "control" ~ "VLCD, no CPI",
+                                  TRUE ~ "other")) %>% 
+  tax_fix() %>% 
+  tax_transform(trans = "alr") %>% 
+  ps_calc_richness(rank = 'Genus', index = 'observed') %>%
+  samdat_tbl() %>% 
+  dplyr::group_by(host_subject_id) %>% 
+  dplyr::filter(n() == 2) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA)), 
+                host_diet = factor(host_diet))
+
+shannon.df <- phylo %>%
+  ps_filter(host_diet != "negative control", host_subject_id %in% rule_in, .keep_all_taxa = TRUE) %>%
+  ps_mutate(subgroups = case_when(host_diet == "FXM" & Treatment == "intervention" ~ "FXM, CPI",
+                                  host_diet == "FXM" & Treatment == "control" ~ "FXM, no CPI",
+                                  host_diet == "VLCD" & Treatment == "intervention" ~ "VLCD, CPI",
+                                  host_diet == "VLCD" & Treatment == "control" ~ "VLCD, no CPI",
+                                  TRUE ~ "other")) %>% 
+  tax_fix() %>% 
+  tax_transform(trans = "alr") %>%  
+  ps_calc_diversity(rank = 'Genus', index = 'shannon') %>%
+  samdat_tbl() %>% 
+  dplyr::group_by(host_subject_id) %>% 
+  dplyr::filter(n() == 2) %>% 
+  dplyr::ungroup()%>% 
+  dplyr::mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA)), 
+                host_diet = factor(host_diet))
+
+# baseline table
+
+baseline.before.tab <- baseline_tab %>% 
+  dplyr::left_join(shannon.df, by = "JMF_sample_ID") %>% 
+  dplyr::left_join(richness.df, by = "JMF_sample_ID") %>% 
+  dplyr::select(Timepoint.x, host_diet.x, Firm_Bact_ratio, shannon_Genus, observed_Genus) %>% 
+  dplyr::rename(host_diet = host_diet.x, 
+                Timepoint = Timepoint.x) %>% 
+  dplyr::filter(Timepoint == "before") %>% 
+  dplyr::select(-Timepoint) %>% 
+  dplyr::mutate(Firm_Bact_ratio.log10 = log10(Firm_Bact_ratio), 
+                observed_Genus.log10 = log10(observed_Genus))
+
+
+
+baseline_tab.summary.param <- cbind(make.baseline.tab.BL(dat = baseline.before.tab, 
+                                         var = c("shannon_Genus", "Firm_Bact_ratio", "observed_Genus"), 
+                                         fun = sum.mean.na.omit, 
+                                         test = "mean"),
+                              make.baseline.tab.BL(dat = baseline.before.tab, 
+                                         var = c("shannon_Genus", "Firm_Bact_ratio", "observed_Genus"), 
+                                         fun = sum.sd.na.omit, 
+                                         test = "sd"))
+colnames(baseline_tab.summary.param) <- c("variable", "mean.VLCD", "mean.FXM" , "ex.variable", "sd.VLCD", "sd.FXM" )
+baseline_tab.summary.param <- baseline_tab.summary.param %>% 
+  dplyr::select(-ex.variable)
+
+
+p.values.baseline.before <- baseline.before.tab %>% 
+  dplyr::select(host_diet, shannon_Genus, observed_Genus.log10, Firm_Bact_ratio.log10) %>% 
+  gather(key = "variable", value = "value", -host_diet) %>% 
+  dplyr::group_by(host_diet, variable) %>% 
+  dplyr::summarise(value = list(value)) %>%  
+  spread(host_diet, value) %>% 
+  dplyr::group_by(variable) %>% 
+  dplyr::mutate(p_value = t.test(unlist(VLCD), unlist(FXM), paired = F)$p.value) %>% 
+  dplyr::select(variable, p_value) %>%  
+  dplyr::mutate(variable = ifelse(variable == "Firm_Bact_ratio.log10", "Firm_Bact_ratio", variable), 
+                variable = ifelse(variable == "observed_Genus.log10", "observed_Genus", variable)) %>% 
+  dplyr::left_join(baseline_tab.summary.param, by = "variable") %>% 
+  dplyr::mutate(p_value = round(p_value, digits = 3),
+                mean.VLCD = round(as.numeric(mean.VLCD), digits = 2),
+                mean.FXM = round(as.numeric(mean.FXM), digits = 2)) %>% 
+  dplyr::mutate(sd.VLCD = round(as.numeric(sd.VLCD), digits = 2),
+                sd.FXM = round(as.numeric(sd.FXM), digits = 2)) %>% 
+  dplyr::mutate(VLCD = paste0(mean.VLCD, " +/- ", sd.VLCD), 
+                FXM = paste0(mean.FXM, " +/- ", sd.FXM), 
+                test = "unpaired t.test", 
+                variable = paste0(variable, ", mean +/- sd")) 
+
+p.values.baseline.before$p.adj <- p.adjust(p.values.baseline.before$p_value, method = "BH")
+
+print(p.values.baseline.before)
+rio::export(p.values.baseline.before, here::here("data", "baseline_characteristics_mean_sd_only.before.xlsx"))
+
+
+baseline_tab %>%  
+  dplyr::mutate(both = paste0(host_diet, "_", Treatment, "_", Timepoint)) %>% 
+  dplyr::group_by(both ) %>% 
+  summarise(mean = mean(Firm_Bact_ratio))
+
+#calculate repeated measures anova
+mut.baseline <- baseline_tab %>% 
+  dplyr::mutate(diet_cpi = paste0(host_diet, "_", Treatment), 
+                BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA)))
+
+summary(aov(Firm_Bact_ratio~factor(Timepoint) * factor(diet_cpi) +Error(factor(JMF_sample_ID)), data = mut.baseline))
+
+
+test.bact <- t.test(subset(baseline_tab, Timepoint == "before")$Firm_Bact_ratio, 
+                    subset(baseline_tab, Timepoint == "after")$Firm_Bact_ratio, 
+                    paired = TRUE)
+
+
+aov.long <- mut.baseline %>% 
+  rstatix::anova_test(dv = Firm_Bact_ratio, 
+                      wid = host_subject_id,
+                      within = Timepoint, 
+                      between = c(BMI_cat))
+
+aov.long.p <- aov.long %>% 
+  data.frame() %>% 
+  dplyr::filter(p..05 == "*") %>% 
+  dplyr::pull(p)
+
+
+#plot
+FB_plot <- baseline_tab %>% 
+#  dplyr::left_join(host_subj_id, by = "JMF_sample_ID") %>% 
+  dplyr::select(host_subject_id, Timepoint, Firm_Bact_ratio) %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "Firm_Bact_ratio") %>% 
+  dplyr::mutate(trend.col = ifelse(before - after < 0, "increase", "decrease")) %>% 
+  tidyr::pivot_longer(cols = c("before", "after"), names_to = "Timepoint", values_to = "Firm_Bact_ratio") %>% 
+  dplyr::mutate(Timepoint = factor(Timepoint, levels = c("before", "after")), 
+                trend.col = factor(trend.col, levels = c("increase", "decrease"))) %>% 
+  ggplot(aes(x = Timepoint, y = Firm_Bact_ratio, fill = Timepoint)) + 
+ # geom_violin(alpha = 0.7) +
+  geom_boxplot(width = 0.3, alpha = 0.7,
+               position=position_dodge(0.2)) + 
+  geom_point(aes(col = trend.col), shape = 16, alpha = 0.7)+
+  geom_line(aes(group = host_subject_id, col = trend.col), alpha = 0.3, lty = 1) +
+  scale_fill_manual(values = c("wheat", "midnightblue")) +
+  scale_color_manual(values = c("darkgreen", "darkred")) +
+  labs(y = 'Firmicutes / Bacteroidetes (log10)', x = "", caption = "paired t-test") +
+  theme_bw() +
+  theme(legend.position="right", legend.direction="vertical", legend.title = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  annotate(geom="text", x=2.3, y=1.95, size = 2, label= paste0("p = ", round(aov.long.p, digits = 3)),
+              color="darkgrey") 
+
+FB_plot
+ggsave(here::here("final", "plots_final", "firmicutes_bacteroidetes_boxplot.pdf"), width = 4, height = 4)
+```
+
+# Bar plot
+
+```{r bar plot}
+rich.plot.groups <- phylo %>%
+  ps_filter(host_diet != "negative control", host_subject_id %in% rule_in, .keep_all_taxa = TRUE) %>%
+  ps_mutate(diet_timepoint = case_when(host_diet == "FXM" & Timepoint == "before" ~ "FXM, before",
+                                  host_diet == "FXM" & Timepoint == "after" ~ "FXM, after",
+                                  host_diet == "VLCD" & Timepoint == "before" ~ "VLCD, before",
+                                  host_diet == "VLCD" & Timepoint == "after" ~ "VLCD, after",
+                                  TRUE ~ "other"),
+            diet_timepoint = factor(diet_timepoint, levels = c("FXM, before", 
+                                                               "VLCD, before",
+                                                               "FXM, after",
+                                                               "VLCD, after")),
+            subgroups = case_when(host_diet == "FXM" & Treatment == "intervention" ~ "FXM, CPI",
+                                  host_diet == "FXM" & Treatment == "control" ~ "FXM, no CPI",
+                                  host_diet == "VLCD" & Treatment == "intervention" ~ "VLCD, CPI",
+                                  host_diet == "VLCD" & Treatment == "control" ~ "VLCD, no CPI",
+                                  TRUE ~ "other"),
+            days = case_when(Timepoint == "before" ~ "d0",
+                             Timepoint == "after" ~ "d14",
+                             TRUE ~ "other"), 
+            subgroups_time = paste0(subgroups, "_", Timepoint), 
+            host_diet = case_when(host_diet == "FXM" ~ 1, 
+                                  host_diet == "VCLD" ~ 2, 
+                                  TRUE ~ 0), 
+            Treatment = case_when(Treatment == "control" ~ 1, 
+                                  Treatment == "intervention" ~ 2, 
+                                  TRUE ~ 0), 
+           diet_cpi_num = case_when(subgroups == "FXM, CPI" ~ 1, 
+                                 subgroups == "FXM, no CPI" ~ 2,
+                                 subgroups == "VLCD, CPI" ~ 3,
+                                 subgroups == "VLCD, no CPI" ~ 4,
+                                 TRUE ~ 0), 
+           time_num = case_when(Timepoint == "before" ~ 1, 
+                                Timepoint == "after" ~2, 
+                                TRUE ~ 0)) %>% 
+  ps_mutate(diet_cpi_num = as.numeric(diet_cpi_num), 
+            time_num = as.numeric(time_num)) %>% 
+  #ps_arrange(days) %>% 
+  tax_fix() %>% 
+  phyloseq::merge_samples(group = "subgroups_time") %>%  
+  ps_mutate(time_num = ifelse(time_num == 1, "before", "after"), 
+            diet_cpi_num = case_when(diet_cpi_num == 1 ~ "FXM, CPI", 
+                                 diet_cpi_num == 2 ~ "FXM, no CPI",
+                                 diet_cpi_num == 3 ~ "VLCD, CPI",
+                                 diet_cpi_num == 4 ~  "VLCD, no CPI",
+                                 TRUE ~ "other")) %>% 
+  ps_mutate(time_num = factor(time_num, levels = c("before", "after"))) %>% 
+  ps_arrange(time_num) %>% 
+  comp_barplot(
+    tax_level = "Genus", n_taxa = 15, label = "time_num", bar_width = 0.7,
+    sample_order = 'asis', 
+    merge_other = TRUE,
+     palette = distinct_palette(15)
+  ) +
+  facet_wrap(
+    vars(factor(diet_cpi_num)),
+    scales = "free_x"
+  )+
+  #coord_flip() +
+  theme_bw() +
+  guides(fill=guide_legend(title="Genus")) +
+  theme(legend.position="bottom", legend.direction="horizontal",
+        legend.background = element_rect(fill='transparent'))
+
+rich.plot.groups
+```
+
+# Sankey plot
+
+```{r sankey plot, fig.height=10}
+# perform ALR tf
+out_rel_abund <- phylo %>% 
+  tax_fix() %>% 
+  tax_transform(trans = "alr", rank = "Genus") 
+#get the tax names
+tax.names <- phylo %>% 
+  tax_fix() %>% 
+  tax_transform(trans = "alr", rank = "Genus") %>% 
+  tt_get() %>% 
+  data.frame()
+# code the counts table into a data frame format
+count <- out_rel_abund@counts
+class(count) <- "matrix"
+count <- data.frame(count) 
+colnames(count) <- tax.names$Genus
+
+# define a frame data frame and select only those patients which have an entry for both visits
+timepoint <- phylo %>% 
+  samdat_tbl() %>% 
+  dplyr::select(JMF_sample_ID, Timepoint, host_subject_id) %>% 
+  dplyr::group_by(host_subject_id) %>% 
+  dplyr::filter(n() == 2) %>% 
+  dplyr::ungroup()
+length(unique(timepoint$host_subject_id))
+
+# restructure the counts data frame and filter out the patients for whom two visits exist
+count <- count %>% 
+  tibble::rownames_to_column(var = "JMF_sample_ID") %>% 
+  dplyr::filter(JMF_sample_ID %in% timepoint$JMF_sample_ID)
+# combine the sample data frame with the counts data frame 
+count.metdat <- timepoint %>% 
+  dplyr::left_join(count, by = "JMF_sample_ID") %>% 
+  tibble::column_to_rownames(var = "JMF_sample_ID") %>% 
+  tidyr::pivot_longer(!c("host_subject_id", "Timepoint"), names_to = "taxon", values_to = "count")%>% 
+  dplyr::group_by(host_subject_id, Timepoint) %>% 
+  dplyr::mutate(total.micr = sum(count), 
+                rel.abd = count/total.micr) %>% 
+  dplyr::ungroup()
+
+#save for later
+rio::export(count.metdat, here::here("data", "count.abd.df.sankey.xlsx"))
+
+# prepare df for sankey input
+dat.sankey <- count.metdat %>% 
+  dplyr::group_by(Timepoint, taxon) %>% 
+  dplyr::summarise(mean.rel.abd.perc = mean(rel.abd)*100, .groups = "drop") %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "mean.rel.abd.perc") %>% 
+  dplyr::mutate(diff.abd.abs = after-before, 
+                diff.abd.rel = after/before -1) %>% 
+  tidyr::pivot_longer(cols = c("before", "after"), names_to = "Timepoint", values_to = "mean.rel.abd.perc") %>% 
+  dplyr::group_by(Timepoint) %>% 
+  dplyr::arrange(desc(mean.rel.abd.perc)) %>% 
+  dplyr::slice(1:15) %>% 
+  dplyr::ungroup() %>% 
+  tidyr::pivot_wider(names_from = Timepoint, values_from = mean.rel.abd.perc)  %>% 
+  dplyr::arrange(desc(before)) %>% 
+  dplyr::mutate(rank.before = seq(1:16)) %>% 
+  dplyr::arrange(desc(after)) %>% 
+  dplyr::mutate(rank.after = seq(1:16)) %>% 
+  dplyr::arrange(taxon) %>% 
+  dplyr::mutate(before = ifelse(is.na(before), min(na.omit(before))/10, before),
+                after = ifelse(is.na(after), min(na.omit(after))/10, after)) %>% 
+  tidyr::pivot_longer(cols = c("before", "after"), names_to = "Timepoint", values_to = "mean.rel.abd.perc") %>% 
+  dplyr::mutate(fill = 1)
+
+# calculate p vals  
+pvals.sankey <- data.frame(taxon = base::unique(dat.sankey$taxon),
+                           pval = NA)
+bact <- base::unique(dat.sankey$taxon)
+for(i in bact){
+  vec.before <- na.omit(subset(count.metdat, taxon  == i & Timepoint == "before")$rel.abd)
+  vec.after <- na.omit(subset(count.metdat, taxon  == i & Timepoint == "after")$rel.abd)
+  pvals.sankey$pval[match(i, pvals.sankey$taxon)] <-  t.test(vec.before, vec.after, paired = TRUE)$p.value
+}
+pvals.sankey$p.adj <- stats::p.adjust(pvals.sankey$pval, method = c("BH"))
+
+# prepare a data frame for a nicer output
+dat.sankey %>%
+  ggplot(aes(x = taxon, y = mean.rel.abd.perc, fill = Timepoint)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("azure3", "darkslategray")) +
+  labs(y = "mean relative abundance [%]", 
+       title = "Relative abundance of microbes",
+       subtitle = "before vs. after intervention") +
+  geom_segment(aes(x = 6.75, xend = 7.25, y = 6, yend = 6)) +
+  geom_text(aes(label = "*", x = 7, y = 7)) +
+  geom_segment(aes(x = 12.75, xend = 13.25, y = 6, yend = 6)) +
+  geom_text(aes(label = "*", x = 13, y = 7)) +
+  geom_segment(aes(x = 14.75, xend = 15.25, y = 6, yend = 6)) +
+  geom_text(aes(label = "*", x = 15, y = 7)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+brewerPlus <- distinct_palette()
+color.ramp <- brewerPlus[1:17] 
+
+#all taxa in barplot (in correct order)
+taxa.richplot <- c("Bacteroides",
+"Alistipes",
+"Parabacteroides",
+"Faecalibacterium",
+"UCG-002",
+"Prevotella",
+"Phascolarctobacterium",
+"Escherichia-Shigella",
+"Barnesiella",
+"Odoribacter",
+"Rhodospirillales Order",
+"Akkermansia",
+"Clostridia UCG-014 Order",
+"Sutterella",
+"[Eubacterium] coprostanoligenes group Family", 
+"Other")
+
+comp.rich <- data.frame(taxa = taxa.richplot, 
+                   code = c(paste(brewerPlus[1:15]), "#7570B3")) %>% 
+  dplyr::arrange(taxa)
+
+comp.sank <- data.frame(taxa = c(unique(dat.sankey$taxon))) %>% 
+  dplyr::arrange(taxa)
+
+comp <- comp.sank %>%  
+  dplyr::left_join(comp.rich, by = join_by(taxa))
+
+#save the most 15 most prevalent taxa before and after (n = 16) intervention for later use (uncorrected names)
+rio::export(comp, here::here("data", "uncorr_names_top16microbes_beforeafter.xlsx"))
+
+
+my_colors <- comp
+
+my_colors$code[is.na(my_colors$code)] <- c("#E7298A")
+
+#all taxa in sankey (in correct order)
+order.taxa <- c("Bacteroides",
+"Alistipes",
+"Parabacteroides",
+"Faecalibacterium",
+"UCG-002",
+"Prevotella",
+"Phascolarctobacterium",
+"Escherichia-Shigella",
+"Barnesiella",
+"Odoribacter",
+"Rhodospirillales Order",
+"Akkermansia",
+"Clostridia UCG-014 Order",
+"Sutterella",
+"[Eubacterium] coprostanoligenes group Family", 
+"Parasutterella")
+
+my_colors <- my_colors[match(order.taxa, my_colors$taxa),]
+
+#save the most 15 most prevalent taxa before and after (n = 16) intervention for later use
+rio::export(my_colors, here::here("data", "top16microbes_beforeafter.xlsx"))
+
+#plot the sankey plot
+sankey.plot <- ggplot(dat.sankey, #FIXME fix the sankey color ramp (e.g. Prevotella should be red)
+       aes(y = fill, axis1 = rank.before, axis2 = rank.after)) +
+  geom_alluvium(aes(fill = taxon), width = 1/12, alpha = 0.8) +
+  geom_stratum(width = 1/12,  color = "grey") +
+  geom_label(stat = "stratum", aes(label = after_stat(stratum), fill= factor(taxon)), size = 3, show.legend = FALSE) +
+  scale_x_discrete(limits = c("d0", "d14"), expand = c(.05, .05)) +
+  scale_fill_manual(values = my_colors$code, 
+                    breaks = order.taxa)+ 
+  labs(y = "")+
+  theme_void() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1), 
+        axis.ticks.y=element_blank(), 
+        axis.text.y=element_blank(), 
+       legend.position="bottom", 
+       legend.direction="horizontal", 
+       legend.background = element_rect(fill='transparent'),
+       legend.text = element_text(size = rel(0.5))) 
+
+sankey.plot
+ggsave(here::here("final", "sankey.png"))
+```
+
+# Box plots alpha diversity
+
+```{r alpha diversity cal restr}
+#calculate repeated measures anova
+richness.df <- phylo %>%
+  ps_filter(host_diet != "negative control",
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>%
+  ps_mutate(subgroups = case_when(host_diet == "FXM" & Treatment == "intervention" ~ "FXM, CPI",
+                                  host_diet == "FXM" & Treatment == "control" ~ "FXM, no CPI",
+                                  host_diet == "VLCD" & Treatment == "intervention" ~ "VLCD, CPI",
+                                  host_diet == "VLCD" & Treatment == "control" ~ "VLCD, no CPI",
+                                  TRUE ~ "other")) %>% 
+  tax_fix() %>% 
+  tax_transform(trans = "alr") %>% 
+  ps_calc_richness(rank = 'Genus', index = 'observed') %>%
+  samdat_tbl() %>% 
+  dplyr::group_by(host_subject_id) %>% 
+  dplyr::filter(n() == 2) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA)), 
+                host_diet = factor(host_diet))
+
+
+aov.long <- richness.df %>% 
+  rstatix::anova_test(dv = observed_Genus, 
+                      wid = host_subject_id,
+                      within = Timepoint, 
+                      between = c(BMI_cat))
+
+aov.long.p <- aov.long %>% 
+  data.frame() %>% 
+  dplyr::filter(p..05 == "*") %>% 
+  dplyr::pull(p)
+
+aov.summary <- list()
+aov.summary.long <- list()
+aov.summary.long$richness <- summary(aov(observed_Genus~factor(Timepoint) * factor(BMI_cat)  + Error(factor(JMF_sample_ID)), data = richness.df))
+aov.summary$richness.before <- summary(aov(observed_Genus~factor(host_diet), data = subset(richness.df, Timepoint == "before")))
+aov.summary$richness.after <- summary(aov(observed_Genus~factor(diet_cpi), data = subset(richness.df, Timepoint == "after")))
+
+test.bact<- t.test(subset(richness.df, Timepoint == "before")$observed_Genus, 
+                    subset(richness.df, Timepoint == "after")$observed_Genus, 
+                    paired = TRUE)
+
+test.bact.FXM <- t.test(subset(richness.df, Timepoint == "before" & host_diet == "FXM")$observed_Genus, 
+                    subset(richness.df, Timepoint == "after"& host_diet == "FXM")$observed_Genus, 
+                    paired = TRUE)
+test.bact.VLCD <- t.test(subset(richness.df, Timepoint == "before" & host_diet == "VLCD")$observed_Genus, 
+                    subset(richness.df, Timepoint == "after"& host_diet == "VLCD")$observed_Genus, 
+                    paired = TRUE)
+test.bact.VLCD$p.value
+
+p.adjust(c(test.bact.VLCD$p.value, test.bact.FXM$p.value))
+
+rich.long.plot <- richness.df %>% 
+  dplyr::select(host_subject_id, Timepoint, observed_Genus) %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "observed_Genus") %>% 
+  dplyr::mutate(trend.col = ifelse(before - after < 0, "increase", "decrease")) %>% 
+  tidyr::pivot_longer(cols = c("before", "after"), names_to = "Timepoint", values_to = "observed_Genus") %>% 
+  dplyr::mutate(Timepoint = factor(Timepoint, levels = c("before", "after")), 
+                trend.col = factor(trend.col, levels = c("increase", "decrease"))) %>% 
+  ggplot(aes(x = Timepoint, y = observed_Genus, fill = Timepoint)) + 
+  geom_boxplot(width = 0.3, alpha = 0.7,
+               position=position_dodge(0.2)) + 
+  geom_point(aes(col = trend.col), shape = 16, alpha = 0.7)+
+  geom_line(aes(group = host_subject_id, col = trend.col), alpha = 0.3, lty = 1) +
+  scale_fill_manual(values = c("wheat", "midnightblue")) +
+  scale_color_manual(values = c("darkgreen", "darkred")) +
+  labs(y = 'observed genus', x = "", caption = "paired t-test") +
+  theme_bw() +
+  theme(legend.position="right", legend.direction="vertical", legend.title = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  annotate(geom="text", x=2.3, y=75, size = 2, label= paste0("p = ", round(aov.long.p, digits = 3)),
+              color="darkgrey") 
+rich.long.plot
+#calculate repeated measures anova
+
+aov.long <- shannon.df %>% 
+  rstatix::anova_test(dv = shannon_Genus, 
+                      wid = host_subject_id,
+                      within = Timepoint, 
+                      between = c(BMI_cat))
+
+aov.long.p <- aov.long %>% 
+  data.frame() %>% 
+  dplyr::filter(p..05 == "*") %>% 
+  dplyr::pull(p)
+
+aov.summary.long$shannon <- summary(aov(shannon_Genus~factor(Timepoint) * factor(host_diet) +Error(factor(JMF_sample_ID)), data = shannon.df))
+aov.summary$shannon.before <- summary(aov(shannon_Genus~factor(diet_cpi), data = subset(shannon.df, Timepoint == "before")))
+aov.summary$shannon.after <- summary(aov(shannon_Genus~factor(diet_cpi), data = subset(shannon.df, Timepoint == "after")))
+
+aov.list <- list(aov.summary, aov.summary.long)
+
+test.bact <- t.test(subset(shannon.df, Timepoint == "before")$shannon_Genus, 
+                    subset(shannon.df, Timepoint == "after")$shannon_Genus, 
+                    paired = TRUE)
+
+test.bact.FXM <- t.test(subset(shannon.df, Timepoint == "before" & host_diet == "FXM")$shannon_Genus, 
+                    subset(shannon.df, Timepoint == "after"& host_diet == "FXM")$shannon_Genus, 
+                    paired = TRUE)
+test.bact.VLCD <- t.test(subset(shannon.df, Timepoint == "before" & host_diet == "VLCD")$shannon_Genus, 
+                    subset(shannon.df, Timepoint == "after"& host_diet == "VLCD")$shannon_Genus, 
+                    paired = TRUE)
+test.bact.VLCD$p.value
+
+p.adjust(c(test.bact.VLCD$p.value, test.bact.FXM$p.value))
+
+shan.long.plot <- shannon.df %>% 
+  dplyr::select(host_subject_id, Timepoint, shannon_Genus, host_diet) %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "shannon_Genus") %>% 
+  dplyr::mutate(trend.col = ifelse(before - after < 0, "increase", "decrease")) %>% 
+  tidyr::pivot_longer(cols = c("before", "after"), names_to = "Timepoint", values_to = "shannon_Genus") %>% 
+  dplyr::mutate(Timepoint = factor(Timepoint, levels = c("before", "after")), 
+                trend.col = factor(trend.col, levels = c("increase", "decrease"))) %>% 
+  ggplot(aes(x = Timepoint, y = shannon_Genus, fill = Timepoint)) + 
+  geom_boxplot(width = 0.3, alpha = 0.7,
+               position=position_dodge(0.2)) + 
+  geom_point(aes(col = trend.col), shape = 16, alpha = 0.7)+
+  geom_line(aes(group = host_subject_id, col = trend.col), alpha = 0.3, lty = 1) +
+  scale_fill_manual(values = c("wheat", "midnightblue")) +
+  scale_color_manual(values = c("darkgreen", "darkred")) +
+#  facet_wrap(vars(host_diet))+
+  labs(y = 'shannon index', x = "", caption = "paired t-test") +
+  theme_bw() +
+  theme(legend.position="right", legend.direction="vertical", legend.title = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  annotate(geom="text", x=2.3, y=4, size = 2, label= paste0("p = ", round(aov.long.p, digits = 3)),
+              color="darkgrey")
+shan.long.plot
+```
+
+# multilevel PCA
+
+workflow available at: <http://mixomics.org/methods/multilevel/> implementation of multilevel function as seen in <https://mixomics-users.discourse.group/t/multilevel-pca-interpretation-biais/1221> & <https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-13-325#Sec14>
+
+```{r PCA}
+#define df
+pls_phylo <- phylo %>% 
+  ps_filter(host_diet != "negative control",
+            .keep_all_taxa = TRUE, 
+            host_subject_id %in% rule_in) %>% 
+  ps_mutate(time.rephrase = ifelse(Timepoint == "before", "d0", "d14"),
+            group2 = ifelse(host_diet == "FXM", "diet 1", "diet 2"),
+            group = paste0(host_diet, ", ", Treatment, ", ", time.rephrase), 
+            diet.time = paste0(group2, ", ", time.rephrase),
+            diet.cpi = paste0(host_diet, ", ", Treatment),
+            time.num = ifelse(Timepoint == "before", 1, 2), 
+            BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "BMI < 25", 
+                                    host_body_mass_index >= 25 ~ "BMI >= 25", 
+                                    TRUE ~ NA), levels = c("BMI < 25", "BMI >= 25")), 
+                host_diet = factor(host_diet),
+            before.plus.diet = case_when(Timepoint == "before" ~ "baseline", 
+                                         Timepoint == "after" & host_diet == "FXM" ~ "FXM",
+                                         Timepoint == "after" & host_diet == "VLCD" ~ "VLCD",
+                                         TRUE ~ "other"), 
+            before.plus.cpi = case_when(Timepoint == "before" ~ "baseline", 
+                                         Timepoint == "after" & Treatment == "intervention" ~ "CPI",
+                                         Timepoint == "after" & Treatment == "control" ~ "no CPI",
+                                         TRUE ~ "other"),
+            before.plus.cpi.asnum = case_when(Timepoint == "before" ~ "1", 
+                                         Timepoint == "after" & Treatment == "intervention" ~ "2",
+                                         Timepoint == "after" & Treatment == "control" ~ "3",
+                                         TRUE ~ "other"), 
+            before.plus.diet.cpi = case_when(Timepoint == "before" ~ "baseline", 
+                                         Timepoint == "after" & diet.cpi == "FXM, intervention" ~ "FXM, CPI",
+                                         Timepoint == "after" & diet.cpi == "FXM, control" ~ "FXM, no CPI",
+                                         Timepoint == "after" & diet.cpi == "VLCD, intervention" ~ "VLCD, CPI",
+                                         Timepoint == "after" & diet.cpi == "VLCD, control" ~ "VLCD, no CPI",
+                                         TRUE ~ "other")) %>% 
+  tax_fix() %>%  
+  tax_filter(min_prevalence = 0.1,
+             prev_detection_threshold = 3) %>% 
+  tax_transform("alr", rank = "Genus") %>% 
+  ps_otu2samdat() 
+
+phylo.as.df <- data.frame(pls_phylo@sam_data)
+
+# adjust the taxa names
+tax.names <- phylo %>% 
+  ps_filter(host_diet != "negative control",
+            .keep_all_taxa = TRUE, 
+            host_subject_id %in% rule_in) %>% 
+  tax_fix() %>%  
+  tax_filter(min_prevalence = 0.1,
+             prev_detection_threshold = 3) %>% 
+  tax_transform("alr", rank = "Genus") %>% 
+  tt_get() %>% 
+  data.frame()
+
+bact.subset <-phylo.as.df[,which( colnames(phylo.as.df)=="Lachnospiraceae.UCG.010" ):ncol(phylo.as.df)]
+corr.taxa.df <- data.frame(old = colnames(bact.subset), new= tax.names$Genus)
+
+
+#remove samples with too high NAs
+remove <- colnames(phylo.as.df[colSums(is.na(phylo.as.df)) > nrow(phylo.as.df)/4])
+phylo.as.df <- phylo.as.df %>% 
+  dplyr::select(-all_of(remove))
+
+#NIPALS
+numeric.X <- phylo.as.df %>% 
+  dplyr::select_if(is.numeric) 
+numeric.X <- impute.nipals(numeric.X, ncomp = 10)
+
+#merge with phylo
+numeric.X <- numeric.X %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column(var = "JMF_sample_ID")
+
+phylo.as.df <- phylo.as.df %>%
+  dplyr::select(-colnames(numeric.X[,2:ncol(numeric.X)]))  %>% 
+  dplyr::left_join(numeric.X, by = join_by(JMF_sample_ID)) %>% 
+  tibble::column_to_rownames(var = "JMF_sample_ID")
+
+
+#reduce near zero variance
+nzv <- mixOmics::nearZeroVar(phylo.as.df, uniqueCut = 15)
+
+# Subset using an if function (in case column length is 0)
+if(length(nzv$Position) > 0) phylo.as.df <- phylo.as.df[, -nzv$Position]
+
+#define data sets
+X <- phylo.as.df %>% 
+  dplyr::select(Lachnospiraceae.UCG.010:ncol(.))
+Y <- phylo.as.df %>% 
+  dplyr::select(host_age, host_body_mass_index, HOMA_IR, OGTT0, Matsuda,
+                Perceived_Stress_Scale, Global_Severity_Index, 
+                Stress_Self)
+
+#clean up taxa annotation 
+corr.taxa.df <- subset(corr.taxa.df, old %in% colnames(X))
+colnames(X) <- corr.taxa.df$new
+
+
+#remove too sparse taxa
+i <- colSums(X == 0, na.rm=TRUE) < nrow(phylo.as.df) - nrow(phylo.as.df)/5
+X <- X[i]
+
+# for later analysis, reintroduce JMF_sample_ID 
+phylo.as.df <- phylo.as.df %>% 
+  tibble::rownames_to_column(var = "JMF_sample_ID")
+
+#make sure every id is there 2x
+id.2x <- phylo.as.df %>% 
+  dplyr::group_by(host_subject_id) %>% 
+  dplyr::filter( n() == 2) %>%
+  dplyr::ungroup() %>% 
+  dplyr::pull(JMF_sample_ID)
+
+X <- X[id.2x,]
+Y <- Y[id.2x,]
+
+#choose parameter for multilevel decomposition 
+multi.level.param <- factor(subset(phylo.as.df, JMF_sample_ID %in% id.2x)$host_subject_id)
+
+#make design matrix for sPLS model
+design <- data.frame(sample = multi.level.param)
+
+# get color palette 
+
+colors5 <- c("navajowhite3", "lightcoral", "maroon", "slategray1",  "skyblue3")
+
+# tune
+tune.pca <- tune.pca(X, multilevel = multi.level.param, ncomp = 10, scale = TRUE)
+
+# PCA
+pca.result <- pca(X, ncomp = 2, multilevel = multi.level.param, scale = TRUE)
+
+multilevel.PCA <- biplot(pca.result, 
+       cutoff = 0.7, 
+       group = subset(phylo.as.df, JMF_sample_ID %in% id.2x)$before.plus.diet.cpi, 
+       col.per.group = colors5, 
+       legend.title = "groups", 
+       pch.legend.title = "BMI",
+       ind.names = F, 
+       pch.size = 5, 
+       pch = subset(phylo.as.df, JMF_sample_ID %in% id.2x)$BMI_cat,  
+       var.names.size = 3.25,
+       cex = 1) +
+   geom_vline(xintercept = 0, col = 'gray81',linetype = 2) +
+    # add hline
+    geom_hline(yintercept = 0, col = 'gray81',linetype = 2) +
+    # customise labs
+    labs(x = paste0("PC1 - ", 100*round(pca.result$prop_expl_var$X[1], 2), "%"), 
+         y = paste0("PC2 - ", 100*round(pca.result$prop_expl_var$X[2], 2), "%"), 
+         title = "Multilevel PCA", 
+         subtitle = "longitudinal effect of intervention on gut microbial composition")
+multilevel.PCA
+```
+
+# Differential abundance analysis
+
+````{=html}
+<!--
+```{r differential abundance analysis}
+#save the most 15 most prevalent taxa before and after (n = 16) intervention for later use
+tax_dat <- rio::import(here::here("data", "uncorr_names_top16microbes_beforeafter.xlsx"))
+tax_top <- tax_dat$dat.sankey
+
+## import count df from sankey
+dat <- rio::import(here::here("data", "count.abd.df.sankey.xlsx"))
+
+counts.per.visit <- dat[, -6]
+microbes.DA <- dat %>% 
+  dplyr::select(-count, -total.micr) %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "rel.abd") %>% 
+  dplyr::mutate(abs.diff_RA = after - before,
+                rel.diff_RA = after / before, 
+                change.in.perc = rel.diff_RA - 1) %>% 
+  tidyr::pivot_longer(cols = c("before", "after"), names_to = "Timepoint", values_to = "rel.abd") %>% 
+  dplyr::left_join(counts.per.visit, by = c("host_subject_id", "taxon", "Timepoint")) %>% 
+  dplyr::rename(total.counts = "total.micr") 
+
+#define sample data frame to join to rel abd data frame
+ps.samdat.DA <- phylo@sam_data %>% 
+  data.frame() %>% 
+  dplyr::select(JMF_sample_ID, host_subject_id, Timepoint,
+                host_diet, Treatment, host_body_mass_index, host_age,
+                Cortisol, Cortisol_Sputum, CRP, Fatty_Liver_Index, FH, LH, oestradiol, Testosteron,
+                Gender_role_self_identification_female, Gender_role_self_identification_male, Gender_role_self_identification_neutral,
+                Global_Severity_Index, Perceived_Stress_Scale, Stress_Family, Stress_Self, Stress_Work,
+                HOMA_IR, OGTT0, OGTT120, IGIxISI, Ins_Index, Matsuda, HDL_Quo, Triglyceride, HDL) %>% 
+  dplyr::filter(host_subject_id %in% rule_in)
+
+piv.metdat <- microbes.DA %>% 
+  dplyr::left_join(ps.samdat.DA, by = c("host_subject_id", "Timepoint")) %>% 
+  dplyr::select(JMF_sample_ID, taxon, rel.abd) %>% 
+  tidyr::pivot_wider(names_from = "taxon", values_from = "rel.abd") %>% 
+  tibble::column_to_rownames(var = "JMF_sample_ID")
+
+alr.tf <- compositions::alr(piv.metdat)
+alr.df <- alr.tf %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column(var = "JMF_sample_ID")
+
+
+piv.wide.microbes.DA <- microbes.DA %>% 
+  dplyr::select(host_subject_id, Timepoint, total.counts) %>% 
+  dplyr::distinct()
+
+count.metdat <- ps.samdat.DA %>% 
+  dplyr::left_join(piv.wide.microbes.DA, by = c("host_subject_id", "Timepoint")) %>% 
+  dplyr::left_join(alr.df, by = "JMF_sample_ID") 
+  
+
+#define subgroups
+FXM_CPI <- subset(count.metdat, host_diet == "FXM" & Treatment == "intervention")
+
+FXM_noCPI <- subset(count.metdat, host_diet == "FXM" & Treatment == "control")
+
+VLCD_CPI <- subset(count.metdat, host_diet == "VLCD" & Treatment == "intervention")
+
+VLCD_noCPI <- subset(count.metdat, host_diet == "VLCD" & Treatment == "control")
+```
+-->
+````
+
+```{r differential abundance analysis 1}
+## code ANCOMBC2 model for LogFC plot
+
+anc.phylo <- phylo %>%
+  ps_filter(host_diet != "negative control", 
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>% 
+  ps_mutate(group = factor(paste0(host_diet, "+", Treatment), 
+                                 levels = c("VLCD+control", "VLCD+intervention", 
+                                            "FXM+control", "FXM+intervention"))) %>% 
+  ps_mutate(time.int = case_when(Timepoint == "before" & group == "VLCD+control" ~ 1,
+                                 Timepoint == "after" & group == "VLCD+control" ~ 2,
+                                 Timepoint == "before" & group == "VLCD+intervention" ~ 3,
+                                 Timepoint == "after" & group == "VLCD+intervention" ~ 4,
+                                 Timepoint == "before" & group == "FXM+control" ~ 5,
+                                 Timepoint == "after" & group == "FXM+control" ~ 6,
+                                 Timepoint == "before" & group == "FXM+intervention" ~ 7,
+                                 Timepoint == "after" & group == "FXM+intervention" ~ 8,
+                                 TRUE ~ 0), 
+            Time2 = factor(Timepoint, levels = c("before", "after")), 
+            BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) %>% 
+  ps_select(group, host_diet, time.int, host_subject_id, Timepoint, Treatment, Time2, BMI_cat) %>% 
+  tax_fix() %>% 
+  tax_filter(min_prevalence = 0.1, 
+             prev_detection_threshold = 3) %>% 
+  tax_agg(rank = "Genus") #no transformation is necessary as the ANCOM-BC2 package does this on its own
+
+tse <- mia::makeTreeSEFromPhyloseq(anc.phylo)
+
+#checking for differences between diet groups regarding longitudinal trends  
+set.seed(123456)
+output4 = ancombc2(data = tse, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "Timepoint",
+                  rand_formula = "(1 | host_subject_id)",  
+                  p_adj_method = "BH", 
+                  group = NULL, pseudo_sens = TRUE,
+                  prv_cut = 0.10, struc_zero = FALSE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 5, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE, dunnet = FALSE, 
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl())
+
+res_prim_all <-  output4$res
+
+## code ANCOMBC2 model for longitudinal family plot
+
+set.seed(123456)
+output.fam = ancombc2(data = tse, assay_name = "counts", tax_level = "Family",
+                  fix_formula = "Timepoint",
+                  rand_formula = "(1 | host_subject_id)",  
+                  p_adj_method = "BH", 
+                  group = NULL, pseudo_sens = TRUE,
+                  prv_cut = 0.10, struc_zero = FALSE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 5, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE, dunnet = FALSE, 
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl())
+
+prim_all.fam <-  output.fam$res
+
+# Subset for diet groups
+anc.phylo.FXM.all <- phylo %>%
+  ps_filter(host_diet == "FXM",
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>% 
+  ps_mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) %>% 
+  tax_fix() %>% 
+  tax_filter(min_prevalence = 0.1, 
+             prev_detection_threshold = 3) %>% 
+    ps_mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) %>% 
+  tax_agg(rank = "Genus") #no transformation is necessary as the ANCOM-BC2 package does this on its own
+
+anc.phylo.VLCD.all <- phylo %>%
+  ps_filter(host_diet == "VLCD", 
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>% 
+    ps_mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) %>% 
+  tax_fix() %>% 
+  tax_filter(min_prevalence = 0.1, 
+             prev_detection_threshold = 3) %>% 
+  tax_agg(rank = "Genus") #no transformation is necessary as the ANCOM-BC2 package does this on its own
+
+tse.FXM.all <- mia::makeTreeSEFromPhyloseq(anc.phylo.FXM.all)
+tse.VLCD.all <- mia::makeTreeSEFromPhyloseq(anc.phylo.VLCD.all)
+
+# longitudinal analysis for diet group only
+set.seed(123456)
+output.FXM.all = ancombc2(data = tse.FXM.all, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "Timepoint",
+                  rand_formula = "(1 | host_subject_id)",  
+                  p_adj_method = "BH", 
+                  group = NULL, pseudo_sens = TRUE,
+                  prv_cut = 0.10, struc_zero = FALSE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 5, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE, dunnet = FALSE, 
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl())
+
+output.VLCD.all = ancombc2(data = tse.VLCD.all, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "Timepoint",
+                  rand_formula = "(1 | host_subject_id)",  
+                  p_adj_method = "BH", 
+                  group = NULL, pseudo_sens = TRUE,
+                  prv_cut = 0.10, struc_zero = FALSE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 5, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE, dunnet = FALSE, 
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl())
+
+
+# Subset for the Diet & Intervention Groups
+
+anc.phylo.FXM <- phylo %>%
+  ps_filter(host_diet == "FXM", 
+            Treatment == "control",
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>% 
+  ps_mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) %>% 
+  tax_fix() %>% 
+  tax_filter(min_prevalence = 0.1, 
+             prev_detection_threshold = 3) %>% 
+    ps_mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) %>% 
+  tax_agg(rank = "Genus") #no transformation is necessary as the ANCOM-BC2 package does this on its own
+
+anc.phylo.FXM.CPI <- phylo %>%
+  ps_filter(host_diet == "FXM", 
+            Treatment == "intervention",
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>% 
+    ps_mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) %>% 
+  tax_fix() %>% 
+  tax_filter(min_prevalence = 0.1, 
+             prev_detection_threshold = 3) %>% 
+  tax_agg(rank = "Genus") #no transformation is necessary as the ANCOM-BC2 package does this on its own
+
+anc.phylo.VLCD <- phylo %>%
+  ps_filter(host_diet == "VLCD", 
+            Treatment == "control",
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>% 
+    ps_mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) %>% 
+  tax_fix() %>% 
+  tax_filter(min_prevalence = 0.1, 
+             prev_detection_threshold = 3) %>% 
+  tax_agg(rank = "Genus") #no transformation is necessary as the ANCOM-BC2 package does this on its own
+
+anc.phylo.VLCD.CPI <- phylo %>%
+  ps_filter(host_diet == "VLCD", 
+            Treatment == "intervention",
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>% 
+    ps_mutate(BMI_cat = factor(case_when(host_body_mass_index < 25 ~ "NW", 
+                                    host_body_mass_index >= 25 & host_body_mass_index < 30 ~ "OW", 
+                                    host_body_mass_index > 30 ~ "OB", 
+                                    TRUE ~ NA))) %>% 
+  tax_fix() %>% 
+  tax_filter(min_prevalence = 0.1, 
+             prev_detection_threshold = 3) %>% 
+  tax_agg(rank = "Genus") #no transformation is necessary as the ANCOM-BC2 package does this on its own
+
+tse.FXM <- mia::makeTreeSEFromPhyloseq(anc.phylo.FXM)
+tse.FXM.CPI <- mia::makeTreeSEFromPhyloseq(anc.phylo.FXM.CPI)
+tse.VLCD <- mia::makeTreeSEFromPhyloseq(anc.phylo.VLCD)
+tse.VLCD.CPI <- mia::makeTreeSEFromPhyloseq(anc.phylo.VLCD.CPI)
+
+#checking for differences between diet groups regarding longitudinal trends  
+
+set.seed(123456)
+output.FXM = ancombc2(data = tse.FXM, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "Timepoint",
+                  rand_formula = "(1 | host_subject_id)",  
+                  p_adj_method = "BH", 
+                  group = NULL, pseudo_sens = TRUE,
+                  prv_cut = 0.10, struc_zero = FALSE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 5, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE, dunnet = FALSE, 
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl())
+
+output.FXM.CPI = ancombc2(data = tse.FXM.CPI, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "Timepoint",
+                  rand_formula = "(1 | host_subject_id)",  
+                  p_adj_method = "BH", 
+                  group = NULL, pseudo_sens = TRUE,
+                  prv_cut = 0.10, struc_zero = FALSE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 5, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE, dunnet = FALSE, 
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl())
+
+output.VLCD = ancombc2(data = tse.VLCD, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "Timepoint",
+                  rand_formula = "(1 | host_subject_id)",  
+                  p_adj_method = "BH", 
+                  group = NULL, pseudo_sens = TRUE,
+                  prv_cut = 0.10, struc_zero = FALSE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 5, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE, dunnet = FALSE, 
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl())
+
+output.VLCD.CPI = ancombc2(data = tse.VLCD.CPI, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "Timepoint",
+                  rand_formula = "(1 | host_subject_id)",  
+                  p_adj_method = "BH", 
+                  group = NULL, pseudo_sens = TRUE,
+                  prv_cut = 0.10, struc_zero = FALSE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 5, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE, dunnet = FALSE, 
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl())
+
+
+# species level
+
+anc.phylo.species <- phylo %>%
+ # ps_filter(.keep_all_taxa = TRUE) %>% 
+  ps_mutate(group = factor(paste0(host_diet, "+", Treatment), 
+                                 levels = c("VLCD+control", "VLCD+intervention", 
+                                            "FXM+control", "FXM+intervention"))) %>% 
+  ps_mutate(time.int = case_when(Timepoint == "before" & group == "VLCD+control" ~ 1,
+                                 Timepoint == "after" & group == "VLCD+control" ~ 2,
+                                 Timepoint == "before" & group == "VLCD+intervention" ~ 3,
+                                 Timepoint == "after" & group == "VLCD+intervention" ~ 4,
+                                 Timepoint == "before" & group == "FXM+control" ~ 5,
+                                 Timepoint == "after" & group == "FXM+control" ~ 6,
+                                 Timepoint == "before" & group == "FXM+intervention" ~ 7,
+                                 Timepoint == "after" & group == "FXM+intervention" ~ 8,
+                                 TRUE ~ 0), 
+            Time2 = factor(Timepoint, levels = c("before", "after"))) %>% 
+  tax_fix(unknowns = c("bacterium", "faecis", "finegoldii", "massiliensis")) %>% 
+  tax_filter(min_prevalence = 0.1, 
+             prev_detection_threshold = 3) %>% 
+  tax_agg(rank = "Species") #no transformation is necessary as the ANCOM-BC2 package does this on its own
+tse.species<- mia::makeTreeSEFromPhyloseq(anc.phylo.species)
+
+#checking for differences between diet groups regarding longitudinal trends  
+
+set.seed(123456)
+output.species= ancombc2(data = tse.species, assay_name = "counts", tax_level = "Species",
+                  fix_formula = "Timepoint",
+                  rand_formula = "(1 | host_subject_id)",  
+                  p_adj_method = "BH", 
+                  group = NULL, pseudo_sens = TRUE,
+                  prv_cut = 0.10, struc_zero = FALSE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 5, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE, dunnet = FALSE, 
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl())
+
+
+
+```
+
+# Longitudinal changes family
+
+```{r longitudinal changes family, eval = FALSE}
+tab_sens.fam <- output.fam$res %>% 
+  dplyr::mutate(sens_diff = ifelse(diff_Timepointafter == TRUE & passed_ss_Timepointafter == TRUE, TRUE, FALSE)) %>% 
+  dplyr::select(taxon, sens_diff)
+
+df_time <- output.fam$res %>%
+    dplyr::select(taxon, ends_with("after"))
+
+sens_time <- tab_sens.fam %>%
+  dplyr::left_join(df_time, by = "taxon") %>% 
+    transmute(taxon, sens_time = diff_Timepointafter)
+
+output.fam$res %>%
+    ggplot(aes(x = taxon, y = passed_ss_Timepointafter, color = passed_ss_Timepointafter)) +
+    geom_point() +
+    scale_color_brewer(palette = "Dark2", name = NULL) +
+    labs(x = NULL, y = "Sensitivity Score") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 60, vjust = 0.5))
+
+## long plot
+group.colors = c("azure3", "darkslategray", "grey70")
+
+#select taxa 
+select.taxa <- subset(output.fam$res, diff_Timepointafter == TRUE)$taxon
+#select.taxa <- select.taxa[select.taxa %in% c(data.taxa.jama$Family, bacteria_df$Family)]
+
+biggest_lfc_fam <- data.frame(taxon = select.taxa, 
+                              lfc = subset(prim_all.fam, taxon %in% select.taxa)$lfc_Timepointafter,
+                              abs.lfc = abs(subset(prim_all.fam, taxon %in% select.taxa)$lfc_Timepointafter)) %>%  
+  dplyr::arrange(desc(abs.lfc))
+
+select.taxa.top.lfc <- subset(biggest_lfc_fam, abs.lfc > 0.5)$taxon[!subset(biggest_lfc_fam, abs.lfc > 0.5)$taxon %in% "Rhodospirillales Order"]
+
+
+anc.phylo@sam_data$Time2 <- ifelse(anc.phylo@sam_data$Timepoint == "before",1 ,2)
+
+ps.prune <- prune_taxa(taxa_sums(anc.phylo)>0, anc.phylo)
+ps.rel <- microbiome::transform(ps.prune, "compositional")
+ps.rel.f <- microbiomeutilities::format_to_besthit(ps.rel)
+ps.rel.f <- ps.rel.f %>% 
+  tax_agg("Family")
+
+long_fam <- plot_paired_abundances(ps.rel.f,
+                             select.taxa=biggest_lfc_fam$taxon,
+                             group="Time2",
+                             group.colors=group.colors,
+                             group.order = c("before", "after"),
+                             dot.opacity = 0.25,
+                             dot.size= 2,
+                             add.violin = TRUE,
+                             line = "host_subject_id",
+                             line.down = "steelblue4",
+                             line.stable = "red",
+                             line.up = "palevioletred", 
+                             line.na.value = "red",
+                             line.guide = "legend",
+                             line.opacity = 0.25,
+                             line.size = 1, 
+                             ncol = 4)
+long_fam <- long_fam + 
+  xlab("Timepoint") + 
+  ylab("Relative abundance [%]") + 
+  scale_y_continuous(labels = function(x) x*100) +
+  labs(fill='Timepoint', title = "Log fold changes after caloric restriction", 
+       subtitle = "on Family level", 
+       caption = "p.adjust < 0.05")  +
+  guides(colour = guide_legend("Trend")) +
+  theme(axis.text.y = element_text(size = 8), legend.position = "bottom")
+
+long_fam
+```
+
+# LogFC plot genus
+
+```{r load df}
+
+tab_sens <- output4$res %>% 
+  dplyr::mutate(sens_diff = ifelse(diff_Timepointafter == TRUE & passed_ss_Timepointafter == TRUE, TRUE, FALSE)) %>% 
+  dplyr::select(taxon, sens_diff)
+
+df_time <- output4$res %>%
+    dplyr::select(taxon, ends_with("after"))
+
+sens_time <- df_time %>% 
+    transmute(taxon, sens_time = diff_Timepointafter)
+
+fig_sens_time = sens_time %>%
+    ggplot(aes(x = taxon, y = sens_time, color = sens_time)) +
+    geom_point() +
+    scale_color_brewer(palette = "Dark2", name = NULL) +
+    labs(x = NULL, y = "Sensitivity Score") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 60, vjust = 0.5))
+
+# LogFC - overall changes 
+res_prim_all <- df_time %>%
+  dplyr::rename(LogFC = lfc_Timepointafter, 
+                p.val = q_Timepointafter) %>% 
+  mutate(taxon = sub(" Family", "", taxon))
+
+
+
+taxonomy <- anc.phylo %>% 
+  tt_get() 
+  
+tax.table <- data.frame(taxonomy@.Data)[, 3:6]
+colnames(tax.table) <- c("Class", "Order", "Family",  "taxon")
+
+tax.table <- tax.table %>% 
+  mutate(Family = ifelse(Family == "[Eubacterium] coprostanoligenes group", "Eubacteriaceae", Family), 
+         taxon = sub(" Family", "", taxon))
+
+spectral_palette <- c("#9e0142", "#d53e4f", "#f46d43", "#fdae61", "#fee08b", "#ffffbf",
+                      "#e6f598", "#abdda4", "#66c2a5", "#3288bd", "#5e4fa2", "#8E0174",
+                      "#c51b7d", "#de77ae", "#f1b6da", "#fde0ef", "#f7f7f7")
+
+logFCplot <- res_prim_all %>%
+  dplyr::filter(p.val < 0.05) %>% 
+  dplyr::left_join(tax.table, by = "taxon") %>% 
+    ggplot(aes(x = fct_reorder(taxon, Family), y = LogFC, fill = Family)) + 
+    geom_bar(stat = "identity", width = 0.7, color = "black", 
+             position = position_dodge(width = 0.4)) +
+    geom_errorbar(aes(ymin = LogFC - se_Timepointafter, ymax = LogFC + se_Timepointafter), 
+                  width = 0.2, position = position_dodge(0.05), color = "black") + 
+    labs(x = NULL, y = "Log fold change", 
+         title = "Log fold changes after caloric restriction", 
+         subtitle = "on Genus level",
+         legend = "Family") + 
+    #scale_fill_manual(values = colors) +
+    scale_fill_brewer(palette="Spectral", direction=-1) +
+    scale_color_discrete(name = NULL) +
+    theme_bw() + 
+    theme(
+          panel.grid.minor.y = element_blank(),
+          axis.text.x = element_text(angle = 60, hjust = 1), 
+          legend.direction = "horizontal", legend.position = "bottom"#, 
+         # legend.box.spacing = unit(-40, "pt")
+          ) 
+logFCplot
+```
+
+# Tile plot
+
+```{r tile plots}
+
+
+res.FXM.all <- output.FXM.all$res
+
+res.VLCD.all <- output.VLCD.all$res
+
+res_prim_strata_all <-  res.FXM.all %>%
+  dplyr::rename(LogFC.FXM.all = lfc_Timepointafter, 
+                unadj.p.val.FXM.all = p_Timepointafter) %>%  
+  dplyr::select(taxon, LogFC.FXM.all, unadj.p.val.FXM.all) %>% 
+  
+  dplyr::left_join(res.VLCD.all, by = "taxon") %>% 
+   dplyr::rename(LogFC.VLCD.all = lfc_Timepointafter, 
+                unadj.p.val.VLCD.all = p_Timepointafter) %>%  
+  dplyr::select(taxon, LogFC.FXM.all, LogFC.VLCD.all, 
+                unadj.p.val.FXM.all, unadj.p.val.VLCD.all) %>% 
+  
+  tidyr::pivot_longer(cols = c("LogFC.FXM.all","LogFC.VLCD.all"), 
+                      names_to = "diet", 
+                      values_to = "LogFC") %>% 
+  tidyr::pivot_longer(cols = c("unadj.p.val.FXM.all", "unadj.p.val.VLCD.all"), 
+                      names_to = "diet2", 
+                      values_to = "unadj.p.val") %>% 
+  
+  dplyr::mutate(unadj.p.val = ifelse(diet == "LogFC.FXM.all" & diet2 == "unadj.p.val.FXM.all" | 
+                                       diet == "LogFC.VLCD.all" & diet2 == "unadj.p.val.VLCD.all" , unadj.p.val, NA)) %>% 
+  dplyr::filter(!is.na(unadj.p.val)) %>% 
+  dplyr::mutate(adj.p.val = p.adjust(unadj.p.val, method = "BH"))  %>% 
+  dplyr::arrange(taxon) 
+
+res_prim_strata_all <- res_prim_strata_all %>% 
+  dplyr::mutate(adj.p.val = p.adjust(unadj.p.val, method = "BH")) %>% 
+  dplyr::arrange(taxon)
+
+res_prim_strata <- res_prim_strata_all %>% 
+  dplyr::filter(adj.p.val < 0.05) %>% 
+  dplyr::select(taxon, diet, LogFC) %>% 
+  tidyr::pivot_wider(names_from = "diet", values_from = "LogFC") %>% 
+  tidyr::pivot_longer(cols = 2:3, names_to = "diet", values_to = "LogFC") %>% 
+  dplyr::mutate(LogFC = round(LogFC,2)) %>% 
+  dplyr::arrange(taxon)
+
+res_prim_all_logFC <- res_prim_strata_all %>% 
+  dplyr::filter(taxon %in% unique(res_prim_strata$taxon)) %>% 
+  dplyr::select(taxon, diet, LogFC) %>% 
+  tidyr::pivot_wider(names_from = "diet", values_from = "LogFC") %>% 
+  tidyr::pivot_longer(cols = 2:3, names_to = "diet", values_to = "LogFC") %>% 
+  dplyr::mutate(LogFC = round(LogFC,2)) %>% 
+  dplyr::arrange(taxon)
+
+
+res_prim_all_padj <- res_prim_strata_all %>% 
+  dplyr::filter(taxon %in% unique(res_prim_strata$taxon)) %>% 
+  dplyr::select(taxon, diet, adj.p.val) %>% 
+  dplyr::mutate(adj.p.val = ifelse(adj.p.val < 0.05, adj.p.val, NA)) %>% 
+  tidyr::pivot_wider(names_from = "diet", values_from = "adj.p.val") %>% 
+  tidyr::pivot_longer(cols = 2:3, names_to = "diet", values_to = "adj.p.val") %>% 
+  dplyr::arrange(taxon)
+
+lo = floor(min(res_prim_strata$LogFC))
+up = ceiling(max(res_prim_strata$LogFC))
+mid = (lo + up)/2
+
+
+add.df <- data.frame(taxon = unique(res_prim_all_logFC$taxon), 
+                     diet = " ", 
+                     LogFC = NA)
+
+d=data.frame(x1=0, x2=18, y1=4, y2=5)
+
+fig_strata <- res_prim_all_logFC %>%
+ # rbind(add.df) %>% 
+  ggplot(aes(x = diet, y = taxon, fill = LogFC)) + 
+  geom_tile(color = "black") +
+  scale_fill_gradient2(low = "#215D99", high = "#C70039", mid = "white", 
+                       na.value = "white", 
+                       midpoint = 0, limit = c(lo, up),
+                       name = "logFC") +
+  geom_text(data = res_prim_strata, aes(diet, taxon, label = LogFC), color = "black", size = 3) +
+  labs(x = NULL, y = NULL, title = "Longitudinal changes in microbial abundances",
+       subtitle = "stratified according to diet groups") +
+#  scale_x_discrete(limits = c("LogFC.VLCD.CPI", "LogFC.VLCD.noCPI", 
+#                              "LogFC.FXM.CPI", "LogFC.FXM.noCPI", " ", "LogFC.VLCD",  "LogFC.FXM"),
+#                   labels=c("LogFC.FXM" = "FXM", 
+#                            "LogFC.FXM.CPI" = "FXM + CPI", 
+#                            "LogFC.FXM.noCPI" = "FXM - CPI",
+#                            "LogFC.VLCD" = "VLCD", 
+ #                           "LogFC.VLCD.CPI" = "VLCD + CPI", 
+  #                          "LogFC.VLCD.noCPI" = "VLCD - CPI"))+
+  scale_y_discrete(limits=rev)+
+    coord_flip() +
+  theme_minimal() +
+  theme(legend.position = "right", 
+        axis.text.x = element_text(angle = 45, hjust = 1))
+fig_strata
+
+# diet and CPI
+#res.FXM.check <- rio::import(here::here("data", "res_prim_FXM.xlsx"))
+res.FXM <- output.FXM$res
+res.FXM.CPI <- output.FXM.CPI$res
+res.VLCD <- output.VLCD$res
+res.VLCD.CPI <- output.VLCD.CPI$res
+
+res_prim_strata_all4unadj <-  res.FXM %>%
+  dplyr::rename(LogFC.FXM = lfc_Timepointafter, 
+                unadj.p.val.FXM = p_Timepointafter) %>%  
+  dplyr::select(taxon, LogFC.FXM, unadj.p.val.FXM) %>% 
+  
+  dplyr::left_join(res.FXM.CPI, by = "taxon") %>% 
+   dplyr::rename(LogFC.FXM.CPI = lfc_Timepointafter, 
+                unadj.p.val.FXM.CPI = p_Timepointafter) %>%  
+  dplyr::select(taxon, LogFC.FXM, LogFC.FXM.CPI, unadj.p.val.FXM, unadj.p.val.FXM.CPI) %>% 
+  
+  dplyr::left_join(res.VLCD, by = "taxon") %>% 
+   dplyr::rename(LogFC.VLCD = lfc_Timepointafter, 
+                unadj.p.val.VLCD = p_Timepointafter) %>%  
+  dplyr::select(taxon, LogFC.FXM, LogFC.FXM.CPI, LogFC.VLCD, 
+                unadj.p.val.FXM, unadj.p.val.FXM.CPI, unadj.p.val.VLCD) %>% 
+  
+  dplyr::left_join(res.VLCD.CPI, by = "taxon") %>% 
+   dplyr::rename(LogFC.VLCD.CPI = lfc_Timepointafter, 
+                unadj.p.val.VLCD.CPI = p_Timepointafter) %>%  
+  dplyr::select(taxon, LogFC.FXM, LogFC.FXM.CPI, LogFC.VLCD, LogFC.VLCD.CPI,
+                unadj.p.val.FXM, unadj.p.val.FXM.CPI, unadj.p.val.VLCD, unadj.p.val.VLCD.CPI) %>% 
+  
+  tidyr::pivot_longer(cols = c("LogFC.FXM":"LogFC.VLCD.CPI"), 
+                      names_to = "diet", 
+                      values_to = "LogFC") %>% 
+  tidyr::pivot_longer(cols = c("unadj.p.val.FXM":"unadj.p.val.VLCD.CPI"), 
+                      names_to = "diet2", 
+                      values_to = "unadj.p.val") %>% 
+  
+  dplyr::mutate(unadj.p.val = ifelse(diet == "LogFC.FXM" & diet2 == "unadj.p.val.FXM" | 
+                                       diet == "LogFC.VLCD" & diet2 == "unadj.p.val.VLCD" |
+                                       diet == "LogFC.FXM.CPI" & diet2 == "unadj.p.val.FXM.CPI" | 
+                                       diet == "LogFC.VLCD.CPI" & diet2 == "unadj.p.val.VLCD.CPI", unadj.p.val, NA)) %>% 
+  dplyr::filter(!is.na(unadj.p.val))
+
+
+res_prim_strata_all4 <- res_prim_strata_all4unadj %>% 
+  dplyr::mutate(adj.p.val = p.adjust(unadj.p.val, method = "BH"))
+
+
+res_prim_strata4 <- res_prim_strata_all4 %>% 
+  dplyr::filter(adj.p.val < 0.2) %>% 
+  dplyr::select(taxon, diet, LogFC) %>% 
+  tidyr::pivot_wider(names_from = "diet", values_from = "LogFC") %>% 
+ # base::replace(is.na(.),0) %>% 
+  tidyr::pivot_longer(cols = 2:4, names_to = "diet", values_to = "LogFC") %>% 
+  dplyr::mutate(LogFC = round(LogFC,2)) %>% 
+  dplyr::arrange(taxon)
+  
+
+get.taxa.for.tiles4 <- unique(res_prim_strata4$taxon)
+
+res_prim_all_logFC4 <- res_prim_strata_all4 %>% 
+  dplyr::filter(taxon %in% get.taxa.for.tiles4) %>% 
+  dplyr::select(taxon, diet, LogFC) %>% 
+  tidyr::pivot_wider(names_from = "diet", values_from = "LogFC") %>% 
+ # base::replace(is.na(.),0) %>% 
+  tidyr::pivot_longer(cols = 2:5, names_to = "diet", values_to = "LogFC") %>% 
+  dplyr::mutate(LogFC = round(LogFC,2)) %>% 
+  dplyr::arrange(taxon)
+
+
+res_prim_all_padj4 <- res_prim_strata_all4 %>% 
+  dplyr::filter(taxon %in% get.taxa.for.tiles4) %>% 
+  dplyr::select(taxon, diet, adj.p.val) %>% 
+  dplyr::mutate(adj.p.val = ifelse(adj.p.val < 0.05, adj.p.val, NA)) %>% 
+  tidyr::pivot_wider(names_from = "diet", values_from = "adj.p.val") %>% 
+  tidyr::pivot_longer(cols = 2:5, names_to = "diet", values_to = "adj.p.val") %>% 
+ # dplyr::mutate(LogFC = round(adj.p.val,2)) %>% 
+  dplyr::arrange(taxon)
+
+lo = floor(min(res_prim_all_logFC4$LogFC))
+up = ceiling(max(res_prim_all_logFC4$LogFC))
+mid = (lo + up)/2
+fig_strata_4 <- res_prim_all_logFC4 %>%
+  ggplot(aes(x = diet, y = taxon, fill = LogFC)) + 
+  geom_tile(color = "black") +
+  scale_fill_gradient2(low = "#215D99", high = "#C70039", mid = "white", 
+                       na.value = "white", 
+                       midpoint = 0, limit = c(lo, up),
+                       name = "logFC") +
+  geom_text(data = res_prim_strata4, aes(diet, taxon, label = LogFC), color = "black", size = 3) +
+  labs(x = NULL, y = NULL, title = "Longitudinal changes in microbial abundances",
+       subtitle = "stratified according to intervention groups") +
+  scale_x_discrete(limits = c("LogFC.FXM.CPI", "LogFC.FXM", 
+                              "LogFC.VLCD.CPI", "LogFC.VLCD"),
+                   labels=c("LogFC.FXM.CPI" = "FXM + CPI", 
+                            "LogFC.FXM" = "FXM",
+                            "LogFC.VLCD" = "VLCD", 
+                            "LogFC.VLCD.CPI" = "VLCD + CPI"))+
+  scale_y_discrete(limits=rev)+
+    coord_flip() +
+  theme_minimal() +
+  theme(legend.position = "right", 
+        axis.text.x = element_text(angle = 45, hjust = 1))
+fig_strata_4
+```
+
+# species violin plots
+
+<https://www.microbiomestat.wiki/longitudinal-study-design/taxonomic-timelines-taxa-analysis-in-longitudinal-studies>
+
+```{r violin plots}
+
+phylo.input <- phylo %>% 
+  ps_filter(!is.na(Timepoint), 
+            host_subject_id %in% rule_in)
+mStat.obj <- MicrobiomeStat::mStat_convert_phyloseq_to_data_obj(phylo.input)
+mStat.obj$meta.dat$Timepoint <- ifelse(mStat.obj$meta.dat$Timepoint == "before", 1, 2)
+
+long.taxa <- generate_taxa_indiv_boxplot_long(
+    data.obj = mStat.obj,
+    subject.var = "host_subject_id",
+    time.var = "Timepoint",
+    t0.level = unique(mStat.obj$meta.dat$Timepoint)[1],
+    ts.levels = unique(mStat.obj$meta.dat$Timepoint)[2],
+#    group.var = "host_diet",  
+    feature.level = c("Species"),
+    feature.dat.type = "proportion",
+    transform = "log",
+    prev.filter = 0.01,
+    abund.filter = 0.01,
+    base.size = 20,
+    theme.choice = "bw",
+    custom.theme = NULL,
+    palette = NULL,
+    pdf = TRUE,
+    file.ann = NULL,
+    pdf.wid = 11,
+    pdf.hei = 8.5
+)
+
+spec <- c("bromii", "prausnitzii", "invisus", "plautii", "longum", "edouardi", "saccharivorans", "intestinalis")
+
+spec.tax.table <- phylo %>% 
+  tax_fix(unknowns = c("bacterium", "faecis", "finegoldii", "intestinalis", "massiliensis", "sanguinis", "timonensis")) %>% 
+  tax_agg(rank = "Species") %>% 
+  tt_get() %>% 
+  data.frame()
+
+anno.tax <- function(x){
+  paste0(substring(subset(spec.tax.table, Species == x)$Genus, 1, 1), ". ", x)
+}
+
+anno.tax("intestinalis")
+
+
+plots <- list()
+
+for (i in spec) {
+  plots[[length(plots) + 1]] <- long.taxa$Species[[i]] + 
+  labs(title = "",
+       subtitle = paste(anno.tax(i))) + 
+  scale_fill_manual(values = c("azure3", "darkslategray")) + 
+#  guides(fill=guide_legend(title="Diet")) + 
+  theme(axis.title.y  = element_text(size = rel(1.25)), 
+        axis.title.x  = element_text(size = rel(1.25)), 
+        axis.text.y  = element_text(size = rel(1)), 
+        axis.text.x  = element_text(size = rel(1)))
+}
+
+plots[[8]] <- plots[[8]] + labs(subtitle = "B. intestinalis")
+
+
+final_plot <- wrap_plots(plots, ncol = 4) 
+final_plot <- final_plot + plot_layout(axes = "collect_y", 
+                         guides = "collect") &
+  theme(legend.position = "bottom", 
+        axis.title.x = element_blank(), 
+        legend.title = element_text(size = 10), 
+        legend.text = element_text(size = 8))
+
+final_plot
+```
+
+# multilevel sPLS2
+
+```{r PLS2}
+joined.phylo <- phylo %>% 
+  ps_filter(host_diet != "negative control",
+            .keep_all_taxa = TRUE, 
+            host_subject_id %in% rule_in) %>% 
+  ps_select(JMF_sample_ID:organism, Timepoint, diet_cpi, Perceived_Stress_Scale) %>% 
+  ps_join(psych.data, 
+          by = c("host_subject_id", "Timepoint"), 
+          type = "left") %>% 
+  ps_mutate(before_groups = case_when(Timepoint == "before" ~ "baseline", 
+                                          Timepoint == "after" ~ host_diet, 
+                                          TRUE ~ NA)) %>% 
+  tax_fix() %>%  
+  tax_filter(min_prevalence = 0.1,
+             prev_detection_threshold = 3) %>% 
+  tax_transform("alr", rank = "Genus") %>% 
+  ps_otu2samdat()
+
+
+
+phylo.as.df <- data.frame(joined.phylo@sam_data) 
+
+# adjust the taxa names
+tax.names <- joined.phylo %>% 
+  tt_get() %>% 
+  data.frame()
+
+bact.subset <-phylo.as.df[,which( colnames(phylo.as.df)=="Lachnospiraceae.UCG.010" ):ncol(phylo.as.df)]
+corr.taxa.df <- data.frame(old = colnames(bact.subset), new= tax.names$Genus)
+
+#remove samples with too high NAs
+remove <- colnames(phylo.as.df[colSums(is.na(phylo.as.df)) > nrow(phylo.as.df)/4])
+phylo.as.df <- phylo.as.df %>% 
+  dplyr::select(-all_of(remove))
+
+#NIPALS
+numeric.X <- phylo.as.df %>% 
+  dplyr::select_if(is.numeric) 
+numeric.X <- impute.nipals(numeric.X, ncomp = 10)
+
+#merge with phylo
+numeric.X <- numeric.X %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column(var = "JMF_sample_ID")
+
+phylo.as.df <- phylo.as.df %>%
+  dplyr::select(-colnames(numeric.X[,2:ncol(numeric.X)]))  %>% 
+  dplyr::left_join(numeric.X, by = join_by(JMF_sample_ID)) %>% 
+  tibble::column_to_rownames(var = "JMF_sample_ID")
+
+#reduce near zero variance
+nzv <- mixOmics::nearZeroVar(phylo.as.df, uniqueCut = 15)
+
+# Subset using an if function (in case column length is 0)
+if(length(nzv$Position) > 0) phylo.as.df <- phylo.as.df[, -nzv$Position]
+
+#define data sets
+X <- phylo.as.df %>% 
+  dplyr::select(Lachnospiraceae.UCG.010:ncol(.))
+Y <- phylo.as.df %>% 
+  dplyr::select(
+                host_age, host_body_mass_index, 
+                cortisol_sputum, IL_6, CRP, 
+                BODI_red_resilience, BODI_red_distancing, 
+                BODI_depression, BODI_dysfunct_compensation, 
+                MtoF, 
+                somatization, obsession_compulsion, interpersonal_sensitivity, 
+                depression, anxiety, hostility, phobic_anxiety,
+                paranoid_ideation, psychotism, GSI, 
+                Baseline_HRV, Stress_HRV, relax_HRV)
+
+#clean up taxa annotation 
+corr.taxa.df <- subset(corr.taxa.df, old %in% colnames(X))
+colnames(X) <- corr.taxa.df$new
+
+
+#remove too sparse taxa
+i <- colSums(X == 0, na.rm=TRUE) < nrow(phylo.as.df) - nrow(phylo.as.df)/5
+X <- X[i]
+
+# for later analysis, reintroduce JMF_sample_ID 
+phylo.as.df <- phylo.as.df %>% 
+  tibble::rownames_to_column(var = "JMF_sample_ID")
+
+#make sure every id is there 2x
+id.2x <- phylo.as.df %>% 
+  dplyr::group_by(host_subject_id) %>% 
+  dplyr::filter( n() == 2) %>%
+  dplyr::ungroup() %>% 
+  dplyr::pull(JMF_sample_ID)
+
+X <- X[id.2x,]
+Y <- Y[id.2x,]
+
+#choose parameter for multilevel decomposition 
+multi.level.param <- factor(subset(phylo.as.df, JMF_sample_ID %in% id.2x)$host_subject_id)
+
+#make design matrix for PCA 
+design <- data.frame(sample = factor(subset(phylo.as.df, JMF_sample_ID %in% id.2x)$host_subject_id), 
+                     Timepoint = factor(subset(phylo.as.df, JMF_sample_ID %in% id.2x)$Timepoint), 
+                     Treatment = factor(subset(phylo.as.df, JMF_sample_ID %in% id.2x)$diet_cpi))
+
+rownames(design) <- rownames(X)
+
+#workflow available at: <http://mixomics.org/methods/multilevel/>
+
+
+colors_baseline_diet <- c("navajowhite3",  "maroon", "skyblue3")
+
+
+# implementation of multilevel function as seen in
+#<https://mixomics-users.discourse.group/t/multilevel-pca-interpretation-biais/1221> & #<https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-13-325#Sec14>
+
+# multilevel tuning with wrapper function https://mixomics-users.discourse.group/t/tuning-multilevel-spls/987/4
+design <- data.frame(sample = factor(subset(phylo.as.df, JMF_sample_ID %in% id.2x)$host_subject_id))
+Xw <- withinVariation(X = X, design = design)
+Yw <- withinVariation(X = Y, design = design)
+
+#according to mixOmics user forum 
+#https://mixomics-users.discourse.group/t/perf-and-tune-producing-different-optimal-component-counts/898
+#https://mixomics-users.discourse.group/t/how-to-determine-test-keepx/797/2
+tune.basic <- spls(X = Xw, 
+                   Y = Yw, 
+                   ncomp = 10, 
+                   mode = "regression")
+set.seed(3112)
+Q2.tune.plot <- perf(tune.basic, 
+                     validation = "Mfold", 
+                     folds = 10, 
+                     nrepeat = 100)
+plot(Q2.tune.plot, criterion = "Q2")
+#keep 2 components
+
+set.seed(3112)
+#https://mixomics-users.discourse.group/t/tuning-multilevel-spls/987/4
+tune.multilevel <- tune.spls(Xw, 
+                             Yw, 
+                             ncomp = 2, 
+                             test.keepX = seq(15, 50, 5), 
+                             test.keepY = seq(10, 20, 2),
+                             validation = "Mfold",
+                             mode = "regression",
+                             folds = 5,
+                             nrepeat = 100,
+                             measure = "cor", 
+                             progressBar = TRUE)
+
+
+choice.keep.X <- tune.multilevel$choice.keepX
+choice.keep.Y <- tune.multilevel$choice.keepY
+choice.ncomp <- tune.multilevel$choice.ncomp
+
+plot(tune.multilevel)
+
+tuned.spls.multilevel <- spls(X, 
+                              Y, 
+                              multilevel = design,
+                              ncomp = 2,
+                              keepX = choice.keep.X, 
+                              keepY = choice.keep.Y,
+                              mode = 'regression')
+
+final.multilevel.spls2.plot <- plotIndiv(tuned.spls.multilevel, 
+                                        rep.space = "XY",
+                                         pch = 19,  
+                                         cex = 2,
+                                         group = subset(phylo.as.df, JMF_sample_ID %in% id.2x)$before_groups, 
+                                         col.per.group = colors_baseline_diet,
+                                         legend = TRUE, 
+                                         legend.title = "Groups", 
+                                         legend.title.pch = "Timepoint",
+                                         Y.label = paste0("Comp 2, exp. var.: X-block ",
+                                                          100*round(tuned.spls.multilevel$prop_expl_var$X[2],2), 
+                                                          "%, Y-block ",
+                                                          100*round(tuned.spls.multilevel$prop_expl_var$Y[2],2),
+                                                          "%"),
+                                        size.xlabel = rel(0.75),
+                                        size.ylabel = rel(0.75),
+                                         X.label = paste0("Comp 1, exp. var.: X-block ",
+                                                          100*round(tuned.spls.multilevel$prop_expl_var$X[1],2), 
+                                                          "%, Y-block ",
+                                                          100*round(tuned.spls.multilevel$prop_expl_var$Y[1],2),
+                                                          "%"),
+                                         title = 'Multilevel sPLS2, XY-space', 
+                                        size.legend = rel(0.75),
+                                        size.legend.title = rel(0.75),
+                                        size.title = rel(1),
+                                         ellipse = F)
+
+mutli.sPLS2.ggplot <- as.ggplot(final.multilevel.spls2.plot$graph)
+
+circleFun <- function(center = c(0,0),diameter = 1, npoints = 100){
+    r = diameter / 2
+    tt <- seq(0,2*pi,length.out = npoints)
+    xx <- center[1] + r * cos(tt)
+    yy <- center[2] + r * sin(tt)
+    return(data.frame(x = xx, y = yy))
+}
+
+#variable plots
+tuned.spls.multilevel.var <- plotVar(tuned.spls.multilevel, 
+        cex = c(2,1.5), 
+        pch = c(1,2),
+        var.names = c(F, F), 
+        col = c("seagreen", "skyblue3"), 
+        style = 'ggplot2')
+
+
+#make ggplot
+small.circ <- circleFun(c(0,0),1,npoints = 100)
+large.circ <- circleFun(c(0,0),2,npoints = 100)
+
+loadings.spls <- tuned.spls.multilevel.var %>%
+  ggplot(aes(x = x, y = y, color = Block, label = rownames(tuned.spls.multilevel.var))) +
+  ggrepel::geom_text_repel(size = 2, max.overlaps = 100, 
+                           min.segment.length = 0)+
+  geom_point(alpha = 0.8, size = 2) +
+  scale_color_manual(values = c("darkgreen", "darkblue")) + # own color scheme
+  geom_path(aes(x = x, y = y), inherit.aes = F, data = small.circ, 
+            lty = 3) +
+  geom_path(aes(x = x, y = y), inherit.aes = F, data = large.circ, 
+            lty = 3) +
+  ggtitle("Variable plot sPLS2") +
+  labs(x = "Component 1", 
+       y = "Component 2") +
+  theme_bw()
+
+loadings.spls
+
+
+#psych anno
+psych.anno.df <- tuned.spls.multilevel.var %>% 
+  dplyr::mutate(label = ifelse(Block == "Y", rownames(.), NA))
+
+tuned.spls.multilevel.var.plot.onlypsch <- psych.anno.df %>%
+  ggplot(aes(x = x, y = y, color = Block, label = label)) +
+  ggrepel::geom_text_repel(size = 2, max.overlaps = 100, 
+                           min.segment.length = 0)+
+  geom_point(alpha = 0.8, size = 2) +
+  scale_color_manual(values = c("darkgreen", "darkblue")) + # own color scheme
+  geom_path(aes(x = x, y = y), inherit.aes = F, data = small.circ, 
+            lty = 3) +
+  geom_path(aes(x = x, y = y), inherit.aes = F, data = large.circ, 
+            lty = 3) +
+  ggtitle("Variable plot sPLS2") +
+  labs(x = "Component 1", 
+       y = "Component 2") +
+  theme_bw()
+
+tuned.spls.multilevel.var.plot.onlypsch
+
+
+#annotated circ plot
+plotVar(tuned.spls.multilevel, 
+        pch = c(1,2),
+        var.names = c(TRUE, TRUE), 
+        cex = c(2, 3.5),
+        col = c("seagreen", "skyblue3"), 
+        style = 'ggplot2')
+ggsave(here::here("final", "plots_final", "circ.plot.spls2.fully.annotated.pdf"),
+       device = "pdf", dpi = "retina", bg = "transparent",
+       height = 10, width = 10, units = "in")
+
+#loading plots
+
+tuned.spls.multilevel.loadings.X <- plotLoadings(tuned.spls.multilevel,
+             block = "X", 
+             size.title = 1,
+             col = "seagreen")
+
+data.frame(tuned.spls.multilevel.loadings.X) %>% 
+  ggplot()
+
+loadings.spls <- data.frame(tuned.spls.multilevel[["loadings"]][["X"]]) %>% dplyr::filter(comp1 != 0) %>% 
+  tibble::rownames_to_column(var = "taxon") %>% 
+  dplyr::mutate(taxon = fct_reorder(taxon, dplyr::desc(abs(comp1))), 
+                col = as.factor(sign(comp1))) %>% 
+  ggplot(aes(x = taxon, y = comp1, fill = col)) +
+  geom_col() + 
+  scale_fill_manual(values = c("darkgreen", "yellowgreen"))+
+  coord_flip() +
+  labs(title = "Loadings", 
+       subtitle = "component 1") +
+  theme_bw() + 
+  theme(legend.position = "none")
+
+loadings.spls
+tuned.spls.multilevel.loadings.Y <- plotLoadings(tuned.spls.multilevel,
+             block = "Y", 
+             size.title = 1, 
+             col = "skyblue")
+
+tuned.spls.multilevel.loadings.Y
+
+#clustered image map
+cim(tuned.spls.multilevel,
+    comp = 1, 
+    margins = c(25, 3),
+    transpose = TRUE,
+    save = "pdf", 
+    name.save = here::here( "alltree.cim.tuned.spls.multilevel.sPLS2_onecomp"))
+
+
+```
+
+# sPLS-DA diet
+
+```{r sPLS-DA according to diet reduction}
+joined.phylo <- phylo %>% 
+  ps_filter(host_diet != "negative control",
+            .keep_all_taxa = TRUE) %>% 
+  ps_select(JMF_sample_ID:organism, Timepoint, Treatment, diet_cpi, Perceived_Stress_Scale) %>% 
+  ps_join(psych.data, 
+          by = c("host_subject_id", "Timepoint"), 
+          type = "left") %>% 
+  tax_fix() %>%  
+  tax_filter(min_prevalence = 0.1,
+             prev_detection_threshold = 3) %>% 
+  tax_transform("alr", rank = "Genus") 
+
+pls_phylo <- joined.phylo %>% 
+ ps_filter(Timepoint == "after", .keep_all_taxa = TRUE) %>% 
+  ps_mutate(group = paste0(host_diet, "_", Treatment)) %>% 
+  ps_otu2samdat() %>%  
+  samdat_tbl() 
+
+#modulate df
+X <- pls_phylo %>% 
+  dplyr::select(Bacteroides:ncol(.))
+  
+joindf <- pls_phylo %>% 
+  dplyr::select(JMF_sample_ID, host_subject_id, Timepoint)
+
+Y.dat <- pls_phylo %>% 
+  dplyr::select(host_subject_id, host_diet,  Treatment) %>% 
+  dplyr::mutate(diet_cpi = paste0(host_diet, "_", Treatment))
+
+
+#define input variables
+X <- X[rownames(Y.dat),]
+Y <- as.factor(Y.dat$host_diet)
+
+#group <- Y.dat$group
+cpi <- subset(phylo.as.df, JMF_sample_ID %in% rownames(Y.dat))$Treatment
+#CPI <- Y.dat$Treatment
+
+#initial PLA-DA model
+basic.diet.plsda <-  mixOmics::plsda(X, Y, ncomp = 5)
+
+#Tuning
+# assess the performance of the sPLS-DA model using repeated CV
+set.seed(1234)
+basic.diet.plsda.perf <- mixOmics::perf(basic.diet.plsda,  
+                              validation = 'Mfold', 
+                              folds = 3, nrepeat = 50, 
+                              progressBar = TRUE)
+
+# extract the optimal component number
+optimal.ncomp <- basic.diet.plsda.perf$choice.ncomp["BER", "max.dist"] 
+optimal.ncomp
+plot(basic.diet.plsda.perf, sd=TRUE) # plot this tuning
+
+# make sPLS-DA
+
+grid.keepX = c(seq(30,70, 5))
+
+diet.tune.splsda = tune.splsda(X, Y,
+                          ncomp = 2, # use optimal component number
+                          test.keepX = grid.keepX,
+                          validation = c('Mfold'),
+                          folds = 5, nrepeat = 50, # use repeated CV
+                          dist = 'max.dist', # maximum distance as metric
+                          progressBar = FALSE)
+
+# extract the optimal component number and optimal feature count per component
+optimal.keepX = diet.tune.splsda$choice.keepX[1:2] 
+optimal.ncomp = diet.tune.splsda$choice.ncomp$ncomp 
+
+plot(diet.tune.splsda) # plot this tuning
+
+diet.tune.splsda$error.rate.class
+
+#final
+final.splsda <- mixOmics::splsda(X, Y, ncomp = 2, 
+                                    keepX = optimal.keepX)
+
+#incorporate background prediction 
+background.max.control <- background.predict(final.splsda, 
+                                             comp.predicted = 2, 
+                                             dist = "max.dist")
+
+#define colors 
+colors <- c("maroon", "skyblue3")
+
+#plot
+
+PLS_DA.plot <- plotIndiv(final.splsda, 
+          pch = 1,
+          legend = TRUE, 
+          ellipse = TRUE, 
+          col.per.group = colors, 
+          background = background.max.control,
+          title = "sPLS-DA", 
+          legend.title = "diet groups",
+          legend.title.pch = "CPI groups",
+          style = 'ggplot2')
+
+#save as ggplot
+PLS_DA.plot.ggplot <- as.ggplot(PLS_DA.plot$graph)
+
+PLS_DA.plot.ggplot
+
+sPLS_DA.plot.diet.ggplot <- PLS_DA.plot$graph  +
+  theme_bw()
+
+
+sPLS_DA.plot.diet.ggplot
+plotLoadings(final.splsda,
+             title =  "Loadings on comp 1 (diet)", 
+             size.title = 1)
+
+loadings.splsda <- plotLoadings(final.splsda,
+             title =  "Loadings on comp 1 (diet)", 
+             size.title = 1)
+
+loadings.spls_da <- data.frame(final.splsda[["loadings"]][["X"]]) %>% dplyr::filter(comp1 != 0) %>% 
+  tibble::rownames_to_column(var = "taxon") %>% 
+  dplyr::mutate(taxon = fct_reorder(taxon, dplyr::desc(abs(comp1))), 
+                col = as.factor(sign(comp1))) %>% 
+  ggplot(aes(x = taxon, y = comp1, fill = col)) +
+  geom_col() + 
+  scale_fill_manual(values = c("darkgreen", "yellowgreen"))+
+  coord_flip() +
+  labs(title = "Loadings", 
+       subtitle = "component 1") +
+  theme_bw() + 
+  theme(legend.position = "none")
+
+loadings.spls_da
+
+#check classification performance
+set.seed(3023003)
+perf.final.splsda <- perf(final.splsda,
+                         validation = "Mfold",
+                         folds = 3, 
+                         progressBar = TRUE, 
+                         nrepeat = 1000)
+
+perf.final.splsda$error.rate$BER[, "max.dist"]
+auroc(final.splsda)
+
+
+model <- perf.final.splsda$error.rate.class$max.dist
+model #from this model we can see that the classification works well for samples which do not change in stress level, but not for those whose stress level changes
+```
+
+# sPLS-DA PSS change
+
+```{r sPLS-DA according to PSS reduction}
+pls_phylo <- joined.phylo %>% 
+  ps_filter(Timepoint == "after",
+            .keep_all_taxa = TRUE) %>% 
+  ps_mutate(group = paste0(host_diet, "_", Treatment)) %>% 
+  ps_otu2samdat()
+
+#modulate df
+X <- data.frame(pls_phylo@sam_data) %>% 
+  dplyr::select(Bacteroides:ncol(.))
+  
+joindf <- data.frame(pls_phylo@sam_data) %>% 
+  dplyr::select(JMF_sample_ID, host_subject_id)
+
+Y.dat <- data.frame(phylo@sam_data) %>% 
+  dplyr::filter(host_diet != "negative control", 
+                host_subject_id %in% rule_in) %>% 
+  dplyr::select(host_subject_id, Timepoint,  Perceived_Stress_Scale) %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "Perceived_Stress_Scale") %>% 
+  dplyr::mutate(PSS_change = case_when(before - after >= 3 ~ "decrease", 
+                                       before - after  < 3 ~ "no decrease",
+                                       TRUE  ~ "n.a.")) %>% 
+ # tidyr::pivot_wider(names_from = "Timepoint", values_from = "stress_cat") %>% 
+#  dplyr::mutate(PSS_change = case_when(before == "moderate" & after == "moderate" ~ "no change", 
+#                                       before == "low" & after == "low" ~ "no change", 
+ #                                      before == "moderate" & after == "low" ~ "decrease", 
+ #                                      before == "low" & after == "moderate" ~ "increase", 
+ #                                      TRUE ~ "n.a.")) %>% 
+  dplyr::inner_join(joindf, by = "host_subject_id") %>% 
+  tibble::column_to_rownames(var = "JMF_sample_ID") %>% 
+  dplyr::filter(PSS_change != "n.a." )
+
+PSS.cont.dat <- data.frame(phylo@sam_data) %>% 
+  dplyr::filter(host_diet != "negative control", 
+                host_subject_id %in% rule_in, 
+                !is.na(Perceived_Stress_Scale)) %>% 
+  dplyr::select(host_subject_id, Timepoint, Perceived_Stress_Scale, host_diet, Treatment) %>% 
+  tidyr::pivot_wider(names_from = "Timepoint", values_from = "Perceived_Stress_Scale") %>% 
+  dplyr::inner_join(joindf, by = "host_subject_id") %>% 
+  tibble::column_to_rownames(var = "JMF_sample_ID")
+
+#check for intergroup diff
+before.after.mean.diff <- data.frame(parameter = "mean absolute difference",
+                                     FXM = round(mean(subset(PSS.cont.dat, host_diet == "FXM")$after - subset(PSS.cont.dat, host_diet == "FXM")$before),
+                                                       3),
+                                     VLCD = round(mean(subset(PSS.cont.dat, host_diet == "VLCD")$after - subset(PSS.cont.dat, host_diet == "VLCD")$before),
+                                                       3),
+                                     CPI = round(mean(subset(PSS.cont.dat, Treatment == "intervention")$after - subset(PSS.cont.dat, Treatment == "intervention")$before),
+                                                       3),
+                                     noCPI = round(mean(subset(PSS.cont.dat, Treatment == "control")$after - subset(PSS.cont.dat, Treatment == "control")$before),
+                                                       3)
+                                 )
+
+before.after.perc.diff <- data.frame(parameter = "mean difference in percent",
+                                     FXM = round(mean(subset(PSS.cont.dat, host_diet == "FXM")$after / subset(PSS.cont.dat, host_diet == "FXM")$before)-1, 
+                                                            3),
+                                     VLCD = round(mean(subset(PSS.cont.dat, host_diet == "VLCD")$after / subset(PSS.cont.dat, host_diet == "VLCD")$before)-1, 
+                                                            3),
+                                     CPI = round(mean(subset(PSS.cont.dat, Treatment == "intervention")$after / subset(PSS.cont.dat, Treatment == "intervention")$before)-1, 
+                                                            3),
+                                     noCPI = round(mean(subset(PSS.cont.dat, Treatment == "control")$after / subset(PSS.cont.dat, Treatment == "control")$before)-1, 
+                                                            3))
+
+before.after.pvals <- data.frame(parameter = "p.value",
+                                 FXM = t.test(subset(PSS.cont.dat, host_diet == "FXM")$before, 
+                                                           subset(PSS.cont.dat, host_diet == "FXM")$after, 
+                                                           paired = TRUE)$p.value,
+                                 VLCD = t.test(subset(PSS.cont.dat, host_diet == "VLCD")$before, 
+                                                           subset(PSS.cont.dat, host_diet == "VLCD")$after, 
+                                                           paired = TRUE)$p.value,
+                                 CPI = t.test(subset(PSS.cont.dat, Treatment == "intervention")$before, 
+                                                           subset(PSS.cont.dat, Treatment == "intervention")$after, 
+                                                           paired = TRUE)$p.value,
+                                 noCPI = t.test(subset(PSS.cont.dat, Treatment == "control")$before, 
+                                                           subset(PSS.cont.dat, Treatment == "control")$after, 
+                                                           paired = TRUE)$p.value)
+
+before.after.output <- rbind(before.after.mean.diff, 
+                             before.after.perc.diff, 
+                             before.after.pvals)
+
+transposed.output <- data.frame(t(before.after.output)) 
+colnames(transposed.output) <- transposed.output[1,]
+transposed.output <- transposed.output[-1,]
+transposed.output$adj.p <- stats::p.adjust(transposed.output$p.value, method = "BH")
+
+#print out the table 
+knitr::kable(transposed.output, 
+             digits = 4,
+             caption = "Longitudinal differences in PSS change per group")
+
+#X with raw count data for basic model
+pls_phylo <- phylo %>% 
+  ps_filter(host_diet != "negative control", 
+            Timepoint == "after", 
+            host_subject_id %in% rule_in,
+            .keep_all_taxa = TRUE) %>% 
+  ps_mutate(group = paste0(host_diet, "_", Treatment)) %>% 
+  tax_fix() %>%  
+  tax_filter(min_sample_abundance = 0.01, 
+             prev_detection_threshold = 3) %>% 
+  tax_agg(rank = "Genus") %>% 
+  ps_otu2samdat()
+
+#modulate df
+X.raw <- data.frame(pls_phylo@sam_data) %>% 
+  dplyr::select(Bacteroides:ncol(.))
+
+
+
+#define input variables
+X <- X[rownames(Y.dat),]
+X.raw <- X.raw[rownames(Y.dat),]
+Y <- as.factor(Y.dat$PSS_change)
+#group <- Y.dat$group
+diet <- subset(phylo.as.df, JMF_sample_ID %in% rownames(Y.dat))$host_diet
+#CPI <- Y.dat$Treatment
+
+#initial PLA-DA model
+basic.PSS.plsda <-  mixOmics::plsda(X.raw, Y, ncomp = 5)
+
+#Tuning
+# assess the performance of the sPLS-DA model using repeated CV
+set.seed(1234)
+basic.PSS.plsda.perf <- mixOmics::perf(basic.PSS.plsda,  
+                              validation = 'Mfold', 
+                              folds = 3, nrepeat = 50, 
+                              progressBar = TRUE)
+
+# extract the optimal component number
+optimal.ncomp <- basic.PSS.plsda.perf$choice.ncomp["BER", "max.dist"] 
+optimal.ncomp
+plot(basic.PSS.plsda.perf, sd=TRUE) # plot this tuning
+
+# make sPLS-DA
+
+grid.keepX = c(seq(5,150, 5))
+
+PSS.tune.splsda = tune.splsda(X, Y,
+                          ncomp = 2, # use optimal component number
+                          test.keepX = grid.keepX,
+                          validation = c('Mfold'),
+                          folds = 3, nrepeat = 1000, # use repeated CV
+                          dist = 'max.dist', # maximum distance as metric
+                          progressBar = FALSE)
+
+# extract the optimal component number and optimal feature count per component
+optimal.keepX = PSS.tune.splsda$choice.keepX[1:2] 
+optimal.ncomp = PSS.tune.splsda$choice.ncomp$ncomp 
+
+plot(PSS.tune.splsda) # plot this tuning
+
+#final
+final.splsda.PSS <- mixOmics::splsda(X, Y, ncomp = 2, 
+                                    keepX = optimal.keepX)
+
+#incorporate background prediction 
+background.max.control <- background.predict(final.splsda.PSS, 
+                                             comp.predicted = 2, 
+                                             dist = "mahalanobis.dist")
+
+#define colors 
+colors <- c("brown", "midnightblue")
+
+#plot
+PLS_DA.plot <- plotIndiv(final.splsda.PSS, 
+          pch = 1,
+          legend = TRUE, 
+          ellipse = TRUE, 
+          col.per.group = colors, 
+          background = background.max.control,
+          title = "sPLS-DA", 
+          legend.title = "PSS change",
+          legend.title.pch = "diet groups",
+          style = 'ggplot2')
+
+sPLS_DA.plot.ggplot <- PLS_DA.plot$graph  +
+  theme_bw()
+
+sPLS_DA.plot.ggplot
+ 
+```
+
+# PCoA
+
+```{r PCoA}
+PCoA_plot<- phylo %>%  ps_filter(host_diet != "negative control", Timepoint == "after", .keep_all_taxa = TRUE) %>% 
+ # ps_mutate(diet_longitudinal = ifelse(Timepoint == "after", host_diet, "baseline"), 
+  #          diet_longitudinal = ifelse(diet_longitudinal == "1", "FXM", diet_longitudinal),
+   #         diet_longitudinal = ifelse(diet_longitudinal == "2", "VLCD", diet_longitudinal)) %>%
+  tax_fix() %>% 
+  tax_filter(min_prevalence = 0.1,
+             prev_detection_threshold = 3) %>%
+  tax_transform(trans = "identity", rank = "Genus") %>%
+  dist_calc("aitchison") %>%
+  ord_calc("PCoA") %>%
+  ord_plot(
+    colour = "host_diet", 
+    size = 3, 
+    alpha = 0.8
+  ) + stat_ellipse(aes(colour = host_diet)) +
+  scale_colour_manual(
+    values = c("maroon", "skyblue3"),
+                      aesthetics = c("fill", "colour")
+                      ) +
+  theme_bw() +
+  labs(colour = "Groups",  title = "Groups after intervention", subtitle = "PCoA") +
+  coord_fixed(0.7, clip = "off") +
+   ggside::geom_xsideboxplot(aes(fill = host_diet, y = host_diet), alpha = 0.7, orientation = "y", show.legend = FALSE) +
+  ggside::geom_ysideboxplot(aes(fill = host_diet, x = host_diet), alpha = 0.7, orientation = "x", show.legend = FALSE) +
+  ggside::scale_xsidey_discrete(labels = NULL) +
+  ggside::scale_ysidex_discrete(labels = NULL) +
+  ggside::theme_ggside_void() 
+PCoA_plot
+
+```
